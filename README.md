@@ -87,14 +87,6 @@ This project addresses the problem with a console-based Restaurant Management Sy
 - **IDE:** Microsoft Visual Studio
 - **Library:** Irvine32 (x86 console application)
 
-## Proposed System Design
-
-Figure 1 shows the main program flow: the administrator logs in, then the main menu is repeatedly displayed until the user chooses to exit.
-
-![Figure 1: Main program flow of the Restaurant Management System](images/figure1-program-flow.png)
-
-*Figure 1: Main program flow of the Restaurant Management System*
-
 ## Work Division
 
 | Member | Responsibilities |
