@@ -1,0 +1,370 @@
+; ==========================================================================
+; Restaurant Management System (x86 Assembly, MASM + Irvine32)
+; File    : restaurant_main.asm
+; Part    : Console menu layout, administrator login, input validation,
+;           main program flow, and auto-creation of module data files.
+; Owner   : Muhammad Shaheer Ismail Khan (25K-0676)
+; Group   : BCS-3E-01
+;
+; NOTE FOR TEAMMATES
+;   * Every module below the "MODULE STUBS" banner is an EMPTY procedure.
+;     Fill in only the body between the TODO comment and RET.
+;   * ShowHeader is a shared UI helper: call it at the top of your module
+;     so every screen looks the same, e.g.
+;         INVOKE ShowHeader, ADDR myTitle
+;   * Modules are responsible for their own "press any key" pause
+;     (call WaitMsg) before returning to the main menu.
+;   * On first run, InitDataFiles creates one .txt file per module in the
+;     program's working directory. Existing files are never overwritten.
+; ==========================================================================
+
+INCLUDE Irvine32.inc
+
+; --------------------------------------------------------------------------
+; Constants
+; --------------------------------------------------------------------------
+MAX_PASS   = 20          ; longest password the buffer accepts
+MAX_TRIES  = 3           ; login attempts before lock-out
+MENU_MIN   = 1
+MENU_MAX   = 5           ; 5 = Exit
+
+; --------------------------------------------------------------------------
+; Prototypes (so INVOKE can be used anywhere in the file)
+; --------------------------------------------------------------------------
+ShowHeader        PROTO, titlePtr:PTR BYTE
+EnsureFile        PROTO, fname:PTR BYTE, header:PTR BYTE
+
+; Calculation helpers for the billing owner (stubs, see bottom of file)
+CalculateBill     PROTO, subtotal:DWORD
+CalculateTax      PROTO, amount:DWORD
+CalculateDiscount PROTO, amount:DWORD
+
+.data
+; ---- Admin credentials -------------------------------------------------
+adminPass   BYTE "admin123",0
+ADMIN_LEN   = ($ - adminPass) - 1          ; length without the null
+passBuf     BYTE MAX_PASS + 1 DUP(0)
+
+; ---- Generated data file names ----------------------------------------
+fnMenu      BYTE "menu_pricing.txt",0
+fnTables    BYTE "table_reservation.txt",0
+fnOrders    BYTE "orders_inventory.txt",0
+fnBilling   BYTE "billing_tax_discount.txt",0
+fnReceipt   BYTE "receipt.txt",0
+
+; ---- Header line written into each new file ---------------------------
+hdrMenu     BYTE "# Menu and Pricing data file",0Dh,0Ah,0
+hdrTables   BYTE "# Table Reservation data file",0Dh,0Ah,0
+hdrOrders   BYTE "# Order Processing and Inventory data file",0Dh,0Ah,0
+hdrBilling  BYTE "# Billing, Tax and Discount data file",0Dh,0Ah,0
+hdrReceipt  BYTE "# Receipt data file",0Dh,0Ah,0
+
+; ---- UI text -----------------------------------------------------------
+lineBar     BYTE "============================================================",0Dh,0Ah,0
+titleLogin  BYTE "        RESTAURANT MANAGEMENT SYSTEM - ADMIN LOGIN",0
+titleMain   BYTE "              RESTAURANT MANAGEMENT SYSTEM",0
+
+promptPass  BYTE "Enter administrator password: ",0
+msgEmpty    BYTE "Password cannot be empty. Try again.",0Dh,0Ah,0
+msgDenied   BYTE "Access denied. Attempts left: ",0
+msgLocked   BYTE 0Dh,0Ah,"Too many failed attempts. Program closing.",0Dh,0Ah,0
+msgWelcome  BYTE "Login successful. Welcome, administrator!",0Dh,0Ah,0
+
+menuItem1   BYTE "   1.  View Menu and Prices",0Dh,0Ah,0
+menuItem2   BYTE "   2.  Reserve a Table",0Dh,0Ah,0
+menuItem3   BYTE "   3.  Take an Order",0Dh,0Ah,0
+menuItem4   BYTE "   4.  Generate Receipt",0Dh,0Ah,0
+menuItem5   BYTE "   5.  Exit",0Dh,0Ah,0
+promptChoice BYTE "Enter your choice (1-5): ",0
+msgBadChoice BYTE "Invalid input. Please enter a number from 1 to 5.",0Dh,0Ah,0
+msgBye      BYTE 0Dh,0Ah,"Thank you for using the Restaurant Management System.",0Dh,0Ah,0
+
+.code
+; ==========================================================================
+; main : program flow (matches Figure 1 of the proposal)
+;        login -> main menu loop -> exit
+; ==========================================================================
+main PROC
+    call InitDataFiles              ; create module .txt files if missing
+
+    call AdminLogin                 ; EAX = 1 valid, 0 locked out
+    cmp  eax, 0
+    je   quitProgram
+
+mainLoop:
+    call ShowMainMenu
+    call GetMenuChoice              ; EAX = validated choice 1..5
+
+    cmp  eax, 1
+    je   goMenu
+    cmp  eax, 2
+    je   goTable
+    cmp  eax, 3
+    je   goOrder
+    cmp  eax, 4
+    je   goReceipt
+    jmp  quitProgram                ; choice 5
+
+goMenu:
+    call MenuAndPricing
+    jmp  mainLoop
+goTable:
+    call TableReservation
+    jmp  mainLoop
+goOrder:
+    call OrderProcessing
+    jmp  mainLoop
+goReceipt:
+    call ReceiptDisplay
+    jmp  mainLoop
+
+quitProgram:
+    mov  edx, OFFSET msgBye
+    call WriteString
+    exit
+main ENDP
+
+; ==========================================================================
+; InitDataFiles : creates every module's .txt file (header line only) the
+;                 first time the program runs. Existing files are kept.
+; ==========================================================================
+InitDataFiles PROC
+    INVOKE EnsureFile, ADDR fnMenu,    ADDR hdrMenu
+    INVOKE EnsureFile, ADDR fnTables,  ADDR hdrTables
+    INVOKE EnsureFile, ADDR fnOrders,  ADDR hdrOrders
+    INVOKE EnsureFile, ADDR fnBilling, ADDR hdrBilling
+    INVOKE EnsureFile, ADDR fnReceipt, ADDR hdrReceipt
+    ret
+InitDataFiles ENDP
+
+; --------------------------------------------------------------------------
+; EnsureFile : creates fname and writes header into it, only if the file
+;              does not already exist.
+; Receives   : fname  - offset of null-terminated file name
+;              header - offset of null-terminated header text
+; --------------------------------------------------------------------------
+EnsureFile PROC USES eax ebx ecx edx, fname:PTR BYTE, header:PTR BYTE
+    mov  edx, fname
+    call OpenInputFile              ; EAX = handle or INVALID_HANDLE_VALUE
+    cmp  eax, INVALID_HANDLE_VALUE
+    jne  alreadyThere
+
+    mov  edx, fname                 ; not found -> create it
+    call CreateOutputFile
+    cmp  eax, INVALID_HANDLE_VALUE
+    je   finished                   ; could not create; skip silently
+    mov  ebx, eax                   ; keep the handle
+
+    INVOKE Str_length, header       ; EAX = header length
+    mov  ecx, eax
+    mov  eax, ebx
+    mov  edx, header
+    call WriteToFile                ; write header line
+    mov  eax, ebx
+    call CloseFile
+    jmp  finished
+
+alreadyThere:
+    call CloseFile                  ; EAX still holds the open handle
+finished:
+    ret
+EnsureFile ENDP
+
+; ==========================================================================
+; ShowHeader : shared screen header. Clears the screen and prints a title
+;              between two bars. Use it at the top of every module.
+; Receives   : titlePtr - offset of null-terminated title text
+; ==========================================================================
+ShowHeader PROC USES eax edx, titlePtr:PTR BYTE
+    call Clrscr
+    mov  eax, yellow + (black * 16)
+    call SetTextColor
+    mov  edx, OFFSET lineBar
+    call WriteString
+    mov  edx, titlePtr
+    call WriteString
+    call Crlf
+    mov  edx, OFFSET lineBar
+    call WriteString
+    mov  eax, white + (black * 16)
+    call SetTextColor
+    call Crlf
+    ret
+ShowHeader ENDP
+
+; ==========================================================================
+; AdminLogin : asks for the administrator password and verifies it with
+;              CMPSB. The user gets MAX_TRIES attempts.
+; Returns    : EAX = 1 if login succeeded, 0 if locked out
+; Validation : empty input is rejected without using up an attempt; the
+;              length must match first, then REPE CMPSB compares the bytes.
+; ==========================================================================
+AdminLogin PROC USES ebx ecx edx esi edi
+    mov  ebx, MAX_TRIES             ; EBX = attempts left
+
+askAgain:
+    INVOKE ShowHeader, ADDR titleLogin
+    mov  edx, OFFSET promptPass
+    call WriteString
+
+    mov  edx, OFFSET passBuf
+    mov  ecx, MAX_PASS              ; never read more than the buffer holds
+    call ReadString                 ; EAX = number of characters typed
+
+    cmp  eax, 0
+    jne  haveInput
+    mov  edx, OFFSET msgEmpty       ; empty input: retry, no penalty
+    call WriteString
+    call WaitMsg
+    jmp  askAgain
+
+haveInput:
+    cmp  eax, ADMIN_LEN             ; different length -> cannot match
+    jne  wrongPass
+
+    cld                             ; compare forward
+    mov  esi, OFFSET passBuf
+    mov  edi, OFFSET adminPass
+    mov  ecx, ADMIN_LEN
+    repe cmpsb                      ; stops at first mismatch
+    jne  wrongPass
+
+    call Crlf                       ; password correct
+    mov  edx, OFFSET msgWelcome
+    call WriteString
+    call WaitMsg
+    mov  eax, 1
+    jmp  loginDone
+
+wrongPass:
+    dec  ebx
+    jz   lockedOut
+    call Crlf
+    mov  edx, OFFSET msgDenied
+    call WriteString
+    mov  eax, ebx
+    call WriteDec
+    call Crlf
+    call WaitMsg
+    jmp  askAgain
+
+lockedOut:
+    mov  edx, OFFSET msgLocked
+    call WriteString
+    mov  eax, 0
+
+loginDone:
+    ret
+AdminLogin ENDP
+
+; ==========================================================================
+; ShowMainMenu : draws the main menu screen.
+; ==========================================================================
+ShowMainMenu PROC USES eax edx
+    INVOKE ShowHeader, ADDR titleMain
+    mov  edx, OFFSET menuItem1
+    call WriteString
+    mov  edx, OFFSET menuItem2
+    call WriteString
+    mov  edx, OFFSET menuItem3
+    call WriteString
+    mov  edx, OFFSET menuItem4
+    call WriteString
+    mov  edx, OFFSET menuItem5
+    call WriteString
+    call Crlf
+    ret
+ShowMainMenu ENDP
+
+; ==========================================================================
+; GetMenuChoice : reads and validates the main menu selection.
+; Returns       : EAX = a number from MENU_MIN to MENU_MAX
+; Validation    : ReadInt sets the Overflow flag when the text is not a
+;                 valid number, so letters and symbols are rejected; the
+;                 value is then range-checked. Repeats until valid.
+; ==========================================================================
+GetMenuChoice PROC USES edx
+tryAgain:
+    mov  edx, OFFSET promptChoice
+    call WriteString
+    call ReadInt                    ; EAX = value, OF = 1 if invalid text
+    jo   badInput
+    cmp  eax, MENU_MIN
+    jl   badInput
+    cmp  eax, MENU_MAX
+    jg   badInput
+    ret                             ; valid choice in EAX
+
+badInput:
+    mov  edx, OFFSET msgBadChoice
+    call WriteString
+    jmp  tryAgain
+GetMenuChoice ENDP
+
+; ==========================================================================
+;                              MODULE STUBS
+;   Empty on purpose. Other contributors fill these in.
+; ==========================================================================
+
+; --------------------------------------------------------------------------
+; Menu and Pricing  (menu item names and prices in parallel arrays)
+; --------------------------------------------------------------------------
+MenuAndPricing PROC
+    ; TODO (Muhammad Ahmad): store menu names and prices in parallel arrays
+    ;                        and display them using indirect addressing.
+    ;                        Data file: menu_pricing.txt
+    ret
+MenuAndPricing ENDP
+
+; --------------------------------------------------------------------------
+; Table Reservation  (two-dimensional availability array)
+; --------------------------------------------------------------------------
+TableReservation PROC
+    ; TODO (Muhammad Ahmad): track table availability in a 2-D array and
+    ;                        reserve seats.
+    ;                        Data file: table_reservation.txt
+    ret
+TableReservation ENDP
+
+; --------------------------------------------------------------------------
+; Order Processing and Inventory  (stock limits)
+; --------------------------------------------------------------------------
+OrderProcessing PROC
+    ; TODO (Muhammad Ahmad): record orders, enforce stock limits and
+    ;                        update quantities.
+    ;                        Data file: orders_inventory.txt
+    ret
+OrderProcessing ENDP
+
+; --------------------------------------------------------------------------
+; Billing, Tax and Discount
+; --------------------------------------------------------------------------
+CalculateBill PROC, subtotal:DWORD
+    ; TODO (Hasnain Ali): compute the bill total with MUL / extended addition.
+    ;                     Result returned in EAX.
+    ;                     Data file: billing_tax_discount.txt
+    ret
+CalculateBill ENDP
+
+CalculateTax PROC, amount:DWORD
+    ; TODO (Hasnain Ali): compute tax with MUL and DIV. Result in EAX.
+    ret
+CalculateTax ENDP
+
+CalculateDiscount PROC, amount:DWORD
+    ; TODO (Hasnain Ali): apply the promotional discount with SHR.
+    ;                     Result in EAX.
+    ret
+CalculateDiscount ENDP
+
+; --------------------------------------------------------------------------
+; Receipt Display  (total, tax, discount, final balance, loyalty points)
+; --------------------------------------------------------------------------
+ReceiptDisplay PROC
+    ; TODO (Hasnain Ali): display the final receipt; call the recursive
+    ;                     loyalty-points routine.
+    ;                     Data file: receipt.txt
+    ret
+ReceiptDisplay ENDP
+
+END main
