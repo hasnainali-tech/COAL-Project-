@@ -1,38 +1,11 @@
-; ============================================================================
-;  Restaurant Management System
-;  EL-2003 Computer Organization and Assembly Language (COAL) Lab
-;  Group: BCS-3E-01
-;    Muhammad Ahmad         25K-0587  (Group Leader)
-;    Muhammad Shaheer Ismail Khan 25K-0676
-;    Hasnain Ali            25K-0841
-;
-;  Environment: Microsoft Visual Studio, MASM, Irvine32, 32-bit x86
-;  Build:       Win32 console application (Debug|Win32 or Release|Win32)
-;
-;  The entire application is native x86 assembly.  All core computational
-;  logic (billing, tax, discount, recursion, array access) is implemented
-;  directly in assembly with no C/C++ host, so the proposal's "inline
-;  assembly" requirement is satisfied inherently.
-;
-;  Proposal features implemented:
-;    1. Administrator login verified with CMPSB
-;    2. Irvine32 keyboard-driven main menu
-;    3. Menu names/prices in parallel arrays, accessed indirectly
-;    4. Table availability in a two-dimensional (8 x 4) seat array
-;    5. Order processing with stock limits and quantity updates
-;    6. Billing with MUL, DIV, extended addition (ADC) and SHR discount
-;    7. Receipt generation with recursive loyalty points
-;    8. Independent per-table orders and billing keyed by table ID
-; ============================================================================
+; Restaurant Management System - BCS-3E-01
+; MASM32 / Irvine32 / Win32 console
 
 TITLE Restaurant Management System - BCS-3E-01
 
 INCLUDE Irvine32.inc
-.STACK 1048576                  ; large stack for the recursive points routine
+.STACK 1048576                          ; 1 MB stack for recursion
 
-; ----------------------------------------------------------------------------
-; Procedure prototypes (required because main calls procedures defined later)
-; ----------------------------------------------------------------------------
 AdminLogin         PROTO
 ReadPassword       PROTO pBuffer:PTR BYTE, maxLen:DWORD
 ReadKeyWait        PROTO
@@ -68,23 +41,19 @@ StrContainsInsensitive PROTO pHaystack:PTR BYTE, pNeedle:PTR BYTE
 ToLowerChar        PROTO charVal:DWORD
 Goodbye            PROTO
 
-; ----------------------------------------------------------------------------
-; Constants
-; ----------------------------------------------------------------------------
-MAX_ITEMS        EQU 10         ; number of menu items
-MAX_ORDER_LINES  EQU 20         ; maximum distinct item lines in one order
-MAX_CLEAR_COLS   EQU 512        ; maximum console width handled by ClearScreen
-TABLE_COUNT      EQU 8          ; restaurant tables
-SEATS_PER_TABLE  EQU 4          ; seats per table (2-D array columns)
-TAX_PERCENT      EQU 5          ; 5% tax
-DISC_THRESHOLD   EQU 3000       ; 25% promo applies at/above Rs. 3000
-POINTS_UNIT      EQU 100        ; one loyalty point per Rs. 100
-ADMIN_USER_LEN   EQU 5          ; "admin"
-ADMIN_PASS_LEN   EQU 7          ; "coal123"
-FILE_BUF_SIZE    EQU 512        ; buffer for file read/write chunks
-SEARCH_BUF_SIZE  EQU 40         ; search input buffer size
+MAX_ITEMS        EQU 10
+MAX_ORDER_LINES  EQU 20
+MAX_CLEAR_COLS   EQU 512
+TABLE_COUNT      EQU 8
+SEATS_PER_TABLE  EQU 4
+TAX_PERCENT      EQU 5
+DISC_THRESHOLD   EQU 3000
+POINTS_UNIT      EQU 100
+ADMIN_USER_LEN   EQU 5
+ADMIN_PASS_LEN   EQU 7
+FILE_BUF_SIZE    EQU 512
+SEARCH_BUF_SIZE  EQU 40
 
-; Console colours (foreground + background * 16)
 COLOR_NORMAL     EQU lightGray + (black * 16)
 COLOR_HEADER     EQU yellow + (black * 16)
 COLOR_MENU       EQU lightCyan + (black * 16)
@@ -92,24 +61,16 @@ COLOR_ERROR      EQU lightRed + (black * 16)
 COLOR_SUCCESS    EQU lightGreen + (black * 16)
 COLOR_DIM        EQU gray + (black * 16)
 
-; ============================================================================
-; DATA
-; ============================================================================
 .data
 
-; ---------------------------- Console clearing -----------------------------
 clearBlanks      BYTE MAX_CLEAR_COLS DUP(' ')
 clearAttribs     WORD MAX_CLEAR_COLS DUP(0)
 
-; ---------------------------- Administrator --------------------------------
 adminUser        BYTE "admin",0
 adminPass        BYTE "coal123",0
 userBuf          BYTE 33 DUP(0)
 passBuf          BYTE 33 DUP(0)
 
-; ---------------------------- Menu data ------------------------------------
-; Item names are separate strings.  menuNames is a parallel array of pointers,
-; so each name is reached with indirect addressing:  [menuNames + index*4].
 item0            BYTE "Chicken Biryani",0
 item1            BYTE "Beef Karahi",0
 item2            BYTE "Chicken Nihari",0
@@ -128,17 +89,10 @@ menuNames        DWORD OFFSET item0, OFFSET item1, OFFSET item2, OFFSET item3
 menuPrices       DWORD 450, 1400, 600, 350, 1800, 650, 300, 80, 100, 120
 menuStock        DWORD  20,   10,  15,  15,    8,  20,  25, 50,  50,  50
 
-; ---------------------------- Tables ---------------------------------------
-; Row-major 2-D array:  tableSeats[table * SEATS_PER_TABLE + seat]
-; 0 = free, 1 = occupied.  tableParty stores the reserved party size.
+; 8 x 4 row-major seat map: 0 = free, 1 = occupied
 tableSeats       BYTE TABLE_COUNT * SEATS_PER_TABLE DUP(0)
 tableParty       BYTE TABLE_COUNT DUP(0)
 
-; ---------------------------- Order state (per table) -----------------------
-; Every table owns an independent order.  A line is reached with the base
-; offset TableOrderBase(tableIdx) = tableIdx * MAX_ORDER_LINES * 4, so orders
-; for different tables never share storage.  The subtotal is kept per table
-; as a 64-bit value (Lo/Hi) and cleared only when that table is billed.
 orderItem        DWORD TABLE_COUNT * MAX_ORDER_LINES DUP(0)
 orderQty         DWORD TABLE_COUNT * MAX_ORDER_LINES DUP(0)
 orderLineCount   DWORD TABLE_COUNT DUP(0)
@@ -146,16 +100,12 @@ orderSubtotalLo  DWORD TABLE_COUNT DUP(0)
 orderSubtotalHi  DWORD TABLE_COUNT DUP(0)
 receiptNo        DWORD 1
 
-; ---------------------------- Billing --------------------------------------
-; Scratch totals for the table currently being billed.  These are republished
-; by ComputeBill(tableIdx) immediately before the receipt is printed/filed.
 billSubtotal     DWORD 0
 billTax          DWORD 0
 billDiscount     DWORD 0
 billFinal        DWORD 0
 billPoints       DWORD 0
 
-; ---------------------------- Login screen strings -------------------------
 loginBanner      BYTE 13,10
                  BYTE "  ============================================================",13,10
                  BYTE "                  SPICE GARDEN RESTAURANT",13,10
@@ -169,7 +119,6 @@ promptPass       BYTE "  Password: ",0
 msgBadLogin      BYTE 13,10,"  Invalid username or password. Please try again.",13,10,0
 msgLoginOK       BYTE 13,10,"  Access granted. Welcome, Administrator.",13,10,0
 
-; ---------------------------- Main menu strings ----------------------------
 mainMenuBanner   BYTE 13,10
                  BYTE "  ============================================================",13,10
                  BYTE "                  SPICE GARDEN RESTAURANT",13,10
@@ -191,7 +140,6 @@ msgTablesReserved BYTE "   |   Tables reserved: ",0
 msgOf            BYTE " / ",0
 msgReceipts      BYTE "   |   Receipts issued: ",0
 
-; ---------------------------- Menu table strings ---------------------------
 menuTitle        BYTE 13,10,"  MENU AND PRICES",13,10,0
 menuTableHeader  BYTE 13,10,"  No.  Item                    Price    Stock",13,10
                  BYTE "  -------------------------------------------------",13,10,0
@@ -199,7 +147,6 @@ colSep           BYTE "  ",0
 menuDivider      BYTE "  -------------------------------------------------",13,10,0
 menuFooter       BYTE 13,10,"  Prices are in PKR. Stock is reduced as orders are placed.",13,10,0
 
-; ---------------------------- Table grid strings ---------------------------
 tableTitle       BYTE 13,10,"  TABLE AVAILABILITY",13,10,0
 tableGridHeader  BYTE 13,10," Tbl | 1  2  3  4  | Status",13,10
                  BYTE "  ------------------------------------------",13,10,0
@@ -209,7 +156,6 @@ statusReserved   BYTE "Reserved (",0
 statusGuests     BYTE " guests)",0
 gridLegend       BYTE 13,10,"  . = free seat    X = occupied seat",13,10,0
 
-; ---------------------------- Reservation strings --------------------------
 promptTableNo    BYTE 13,10,"  Enter table number (1-8, 0 to cancel): ",0
 promptParty      BYTE "  Enter party size (1-4, 0 to cancel): ",0
 msgInvalidTable  BYTE 13,10,"  Invalid table number. Enter 1-8, or 0 to cancel.",13,10,0
@@ -222,7 +168,6 @@ msgForLabel      BYTE " reserved for ",0
 msgGuestsLabel   BYTE " guest(s).",13,10,0
 msgReservationCancelled BYTE 13,10,"  Reservation cancelled.",13,10,0
 
-; ---------------------------- Order strings --------------------------------
 orderTitle       BYTE 13,10,"  TAKE ORDER",0
 msgOrderForTable BYTE "  -  Table ",0
 msgSelectTable   BYTE 13,10,"  Select a reserved table for this order.",13,10,0
@@ -246,7 +191,6 @@ msgEquals        BYTE " = Rs. ",0
 msgOrderEmpty    BYTE 13,10,"  No items were ordered. The order was cancelled.",13,10,0
 msgOrderRecorded BYTE 13,10,"  Order recorded. Select Generate Receipt (4) to bill the customer.",13,10,0
 
-; ---------------------------- Receipt strings ------------------------------
 receiptBanner    BYTE "  ==============================================================",13,10
                  BYTE "                    SPICE GARDEN RESTAURANT",13,10
                  BYTE "                       CUSTOMER RECEIPT",13,10
@@ -272,13 +216,11 @@ promptBillTable  BYTE 13,10,"  Table number to bill (0 to cancel): ",0
 msgTableNoOrder  BYTE 13,10,"  That table has no order to bill.",13,10,0
 msgBillingCancelled BYTE 13,10,"  Billing cancelled.",13,10,0
 
-; ---------------------------- Exit strings ---------------------------------
 msgGoodbye       BYTE "  Thank you for using the Restaurant Management System.",13,10,0
 msgGroup         BYTE "  COAL Project - BCS-3E-01",13,10
                  BYTE "  Muhammad Ahmad, Shaheer Ismail Khan, Hasnain Ali",13,10,0
 msgPressAnyKey   BYTE "Press any key to continue...",0
 
-; ---------------------------- Filing and searching -------------------------
 recordsFileName  BYTE "records.txt",0
 fileBuffer       BYTE FILE_BUF_SIZE DUP(0)
 numStrBuffer     BYTE 16 DUP(0)
@@ -322,14 +264,8 @@ fileLineSep      BYTE " = Rs. ",0
 fileNewLine      BYTE 13,10,0
 fileBlankLine    BYTE 13,10,13,10,0
 
-; ============================================================================
-; CODE
-; ============================================================================
 .code
 
-; ----------------------------------------------------------------------------
-; main - entry point: login, then repeatedly show the main menu.
-; ----------------------------------------------------------------------------
 main PROC
     mov  eax, COLOR_NORMAL
     call SetTextColor
@@ -337,7 +273,7 @@ main PROC
     call AdminLogin
 
 MainMenuLoop:
-    call ShowMainMenu                  ; choice returned in EAX
+    call ShowMainMenu
     cmp  eax, 1
     je   OptionView
     cmp  eax, 2
@@ -352,7 +288,7 @@ MainMenuLoop:
     je   OptionFiled
     cmp  eax, 7
     je   OptionExit
-    jmp  MainMenuLoop                  ; safety net
+    jmp  MainMenuLoop
 
 OptionView:
     call ViewMenu
@@ -377,11 +313,6 @@ OptionExit:
     exit
 main ENDP
 
-; ----------------------------------------------------------------------------
-; AdminLogin - proposal module 1.
-; Reads a username and a masked password and verifies both with CMPSB
-; (inside VerifyString).  The login repeats until the credentials match.
-; ----------------------------------------------------------------------------
 AdminLogin PROC
 LoginRetry:
     call ClearScreen
@@ -407,13 +338,11 @@ LoginRetry:
     call WriteString
     INVOKE ReadPassword, OFFSET passBuf, 32
 
-    ; Verify the username with CMPSB.
-    INVOKE Str_length, OFFSET userBuf  ; EAX = entered length
+    INVOKE Str_length, OFFSET userBuf
     INVOKE VerifyString, OFFSET adminUser, OFFSET userBuf, ADMIN_USER_LEN, eax
     test eax, eax
     jz   LoginFailed
 
-    ; Verify the password with CMPSB.
     INVOKE Str_length, OFFSET passBuf
     INVOKE VerifyString, OFFSET adminPass, OFFSET passBuf, ADMIN_PASS_LEN, eax
     test eax, eax
@@ -441,13 +370,6 @@ LoginFailed:
     jmp  LoginRetry
 AdminLogin ENDP
 
-; ----------------------------------------------------------------------------
-; ReadKeyWait - blocking key read that does not flush pending input.
-; Irvine32's ReadKey calls ReadKeyFlush after every key, so fast typing (or a
-; paste) into ReadChar loses characters.  Reading the console input record
-; directly preserves every queued keystroke.
-; Returns: EAX = ASCII code (0 for special/extended keys).
-; ----------------------------------------------------------------------------
 ReadKeyWait PROC USES ebx
     LOCAL hIn:DWORD
     LOCAL rec:INPUT_RECORD
@@ -468,30 +390,24 @@ RKW_Retry:
     ret
 ReadKeyWait ENDP
 
-; ----------------------------------------------------------------------------
-; ReadPassword - reads a masked line using ReadKeyWait.
-; Receives: pBuffer = destination, maxLen = maximum characters.
-; Returns:  EAX = number of characters stored.
-; Backspace erases, Enter terminates, printable ASCII is echoed as '*'.
-; ----------------------------------------------------------------------------
 ReadPassword PROC USES esi, pBuffer:PTR BYTE, maxLen:DWORD
     LOCAL count:DWORD
 
     mov  count, 0
     mov  esi, pBuffer
 RP_Loop:
-    call ReadKeyWait                   ; AL = ASCII code
-    cmp  al, 13                        ; Enter?
+    call ReadKeyWait
+    cmp  al, 13
     je   RP_Done
-    cmp  al, 8                         ; Backspace?
+    cmp  al, 8
     je   RP_Backspace
-    cmp  al, 32                        ; ignore control characters
+    cmp  al, 32
     jb   RP_Loop
     cmp  al, 126
     ja   RP_Loop
     mov  ecx, count
     cmp  ecx, maxLen
-    jae  RP_Loop                       ; buffer full: ignore extra keys
+    jae  RP_Loop
     mov  BYTE PTR [esi+ecx], al
     inc  count
     mov  al, '*'
@@ -502,7 +418,7 @@ RP_Backspace:
     cmp  count, 0
     je   RP_Loop
     dec  count
-    mov  al, 8                         ; move back, erase, move back again
+    mov  al, 8
     call WriteChar
     mov  al, ' '
     call WriteChar
@@ -518,21 +434,13 @@ RP_Done:
     ret
 ReadPassword ENDP
 
-; ----------------------------------------------------------------------------
-; ReadNumber - reads and strictly validates an unsigned decimal number.
-; Irvine32's ReadDec returns 0 with CF clear when the text is not numeric,
-; which would silently turn "abc" into 0 (a cancel/finish request).  This
-; routine reads a whole line, accepts optional leading/trailing spaces, and
-; sets CF when the line is empty, contains a non-digit, or overflows 32 bits.
-; Returns: EAX = value, CF = 0;  EAX = 0, CF = 1 on error.
-; ----------------------------------------------------------------------------
 ReadNumber PROC USES esi ebx
     LOCAL buf[16]:BYTE
     LOCAL digit:DWORD
 
     lea  edx, buf
-    mov  ecx, 12                       ; up to 11 digits + null terminator
-    call ReadString                    ; EAX = characters read
+    mov  ecx, 12
+    call ReadString
     mov  ecx, eax
     test ecx, ecx
     jz   RN_Error
@@ -552,7 +460,7 @@ RN_SkipLead:
     jmp  RN_Lead
 
 RN_Start:
-    xor  eax, eax                      ; accumulator
+    xor  eax, eax
 RN_Digit:
     movzx edx, BYTE PTR [esi]
     cmp  dl, ' '
@@ -561,12 +469,12 @@ RN_Digit:
     je   RN_Trail
     sub  edx, '0'
     cmp  edx, 9
-    ja   RN_Error                      ; not a decimal digit
+    ja   RN_Error
     mov  digit, edx
     mov  ebx, 10
-    mul  ebx                           ; EAX = EAX * 10
+    mul  ebx
     test edx, edx
-    jnz  RN_Error                      ; overflow past 32 bits
+    jnz  RN_Error
     add  eax, digit
     jc   RN_Error
     inc  esi
@@ -579,7 +487,7 @@ RN_Trail:
     cmp  dl, ' '
     je   RN_TrailNext
     cmp  dl, 9
-    jne  RN_Error                      ; junk after the number
+    jne  RN_Error
 RN_TrailNext:
     inc  esi
     dec  ecx
@@ -595,24 +503,20 @@ RN_Error:
     ret
 ReadNumber ENDP
 
-; ----------------------------------------------------------------------------
-; VerifyString - exact byte comparison using CMPSB.
-; Receives: pStored, pEntered, storedLen, enteredLen.
-; Returns:  EAX = 1 if equal, 0 otherwise.
-; ----------------------------------------------------------------------------
+; exact byte comparison using CMPSB
 VerifyString PROC USES esi edi ecx, pStored:PTR BYTE, pEntered:PTR BYTE, storedLen:DWORD, enteredLen:DWORD
     mov  eax, 0
     mov  ecx, storedLen
     cmp  ecx, enteredLen
-    jne  VS_Done                       ; different lengths cannot match
+    jne  VS_Done
     test ecx, ecx
     jz   VS_Match
 
     mov  esi, pStored
     mov  edi, pEntered
     cld
-    repe cmpsb                         ; compare bytes while equal
-    jne  VS_Done                       ; ZF=0 means a mismatch
+    repe cmpsb                          ; compare bytes until mismatch
+    jne  VS_Done
 
 VS_Match:
     mov  eax, 1
@@ -620,11 +524,6 @@ VS_Done:
     ret
 VerifyString ENDP
 
-; ----------------------------------------------------------------------------
-; ShowMainMenu - proposal module 2.
-; Draws the main menu, shows status, reads a validated choice 1..5.
-; Returns: EAX = choice.
-; ----------------------------------------------------------------------------
 ShowMainMenu PROC
 MenuRetry:
     call ClearScreen
@@ -663,9 +562,6 @@ MenuBad:
     jmp  MenuRetry
 ShowMainMenu ENDP
 
-; ----------------------------------------------------------------------------
-; ShowStatusLine - one-line status of orders, reservations and receipts.
-; ----------------------------------------------------------------------------
 ShowStatusLine PROC
     mov  eax, COLOR_DIM
     call SetTextColor
@@ -698,7 +594,7 @@ SSL_Tables:
     mov  edx, OFFSET msgReceipts
     call WriteString
     mov  eax, receiptNo
-    dec  eax                           ; receipts already issued
+    dec  eax
     call WriteDec
     call Crlf
 
@@ -707,10 +603,6 @@ SSL_Tables:
     ret
 ShowStatusLine ENDP
 
-; ----------------------------------------------------------------------------
-; CountReservedTables - counts rows whose first seat is occupied.
-; Returns: EAX = number of reserved tables.
-; ----------------------------------------------------------------------------
 CountReservedTables PROC USES esi
     LOCAL count:DWORD, row:DWORD
     mov  count, 0
@@ -719,7 +611,7 @@ CRT_Loop:
     mov  eax, row
     cmp  eax, TABLE_COUNT
     jae  CRT_Done
-    shl  eax, 2                        ; row * 4  (SEATS_PER_TABLE)
+    shl  eax, 2
     lea  esi, tableSeats
     cmp  BYTE PTR [esi+eax], 0
     je   CRT_Next
@@ -732,10 +624,6 @@ CRT_Done:
     ret
 CountReservedTables ENDP
 
-; ----------------------------------------------------------------------------
-; CountActiveOrders - counts tables that have at least one order line.
-; Returns: EAX = number of tables with orders.
-; ----------------------------------------------------------------------------
 CountActiveOrders PROC USES esi
     LOCAL count:DWORD, idx:DWORD
     mov  count, 0
@@ -756,10 +644,6 @@ CAO_Done:
     ret
 CountActiveOrders ENDP
 
-; ----------------------------------------------------------------------------
-; ShowTablesWithOrders - prints the numbers of tables that have order lines.
-; Used on the order-table and bill-table selection screens.
-; ----------------------------------------------------------------------------
 ShowTablesWithOrders PROC USES esi ebx
     mov  eax, COLOR_DIM
     call SetTextColor
@@ -787,10 +671,6 @@ STWO_Done:
     ret
 ShowTablesWithOrders ENDP
 
-; ----------------------------------------------------------------------------
-; WritePadded - writes a null-terminated string then pads with spaces.
-; Receives: pString, fieldWidth.  If the string is longer, nothing is padded.
-; ----------------------------------------------------------------------------
 WritePadded PROC pString:PTR BYTE, fieldWidth:DWORD
     LOCAL len:DWORD, pad:DWORD
     INVOKE Str_length, pString
@@ -800,7 +680,7 @@ WritePadded PROC pString:PTR BYTE, fieldWidth:DWORD
 
     mov  eax, fieldWidth
     sub  eax, len
-    jbe  WP_Done                       ; fieldWidth <= length
+    jbe  WP_Done
     mov  pad, eax
 WP_Spaces:
     mov  al, ' '
@@ -811,10 +691,6 @@ WP_Done:
     ret
 WritePadded ENDP
 
-; ----------------------------------------------------------------------------
-; WriteDecPadded - writes an unsigned decimal right-aligned in a field.
-; Receives: value, fieldWidth.
-; ----------------------------------------------------------------------------
 WriteDecPadded PROC USES ebx, value:DWORD, fieldWidth:DWORD
     LOCAL digits:DWORD, pad:DWORD, val:DWORD
     mov  eax, value
@@ -845,13 +721,6 @@ WDP_Value:
     ret
 WriteDecPadded ENDP
 
-; ----------------------------------------------------------------------------
-; ClearScreen - clears only the visible console window.
-; Irvine32's Clrscr writes blanks to every line of the console buffer.  The
-; default Windows console buffer is 9001 lines, which makes Clrscr take several
-; seconds.  This routine clears just the visible window (about 30 lines) and
-; homes the cursor, so every menu redraw is instant.
-; ----------------------------------------------------------------------------
 ClearScreen PROC USES edi ebx
     LOCAL info:CONSOLE_SCREEN_BUFFER_INFO
     LOCAL origin:COORD
@@ -863,7 +732,6 @@ ClearScreen PROC USES edi ebx
     mov  ebx, eax
     INVOKE GetConsoleScreenBufferInfo, ebx, ADDR info
 
-    ; width = visible window width, capped at MAX_CLEAR_COLS
     movzx eax, info.srWindow.Right
     movzx ecx, info.srWindow.Left
     sub  eax, ecx
@@ -874,13 +742,11 @@ ClearScreen PROC USES edi ebx
 CS_WidthOK:
     mov  fieldWidth, eax
 
-    ; Fill the attribute buffer with the current console attribute.
     mov  ax, info.wAttributes
     mov  ecx, fieldWidth
     mov  edi, OFFSET clearAttribs
     rep  stosw
 
-    ; Clear each visible row.
     mov  origin.X, 0
     movzx eax, info.srWindow.Top
     mov  row, eax
@@ -903,13 +769,6 @@ CS_Done:
     ret
 ClearScreen ENDP
 
-; ----------------------------------------------------------------------------
-; WaitEnter - replacement for Irvine32 WaitMsg.
-; WaitMsg uses ReadChar, and ReadChar's ReadKey flushes the console input
-; buffer after every poll.  A key that arrives just before a flush is lost.
-; This routine uses ReadKeyWait, which never flushes, so a key press is never
-; dropped.  The prompt text matches WaitMsg exactly.
-; ----------------------------------------------------------------------------
 WaitEnter PROC
     mov  edx, OFFSET msgPressAnyKey
     call WriteString
@@ -918,11 +777,6 @@ WaitEnter PROC
     ret
 WaitEnter ENDP
 
-; ----------------------------------------------------------------------------
-; ViewMenu - proposal module 3.
-; Displays item names, prices and stock.  Names are reached indirectly
-; through menuNames, while prices/stock are parallel DWORD arrays.
-; ----------------------------------------------------------------------------
 ViewMenu PROC
     call ClearScreen
     mov  eax, COLOR_HEADER
@@ -944,9 +798,6 @@ ViewMenu PROC
     ret
 ViewMenu ENDP
 
-; ----------------------------------------------------------------------------
-; PrintMenuTable - prints the menu rows (no clearing, no pause).
-; ----------------------------------------------------------------------------
 PrintMenuTable PROC USES esi
     LOCAL i:DWORD
     mov  eax, COLOR_HEADER
@@ -962,14 +813,14 @@ PMT_Loop:
     cmp  eax, MAX_ITEMS
     jae  PMT_Done
 
-    inc  eax                           ; display item number as 1..10
+    inc  eax
     INVOKE WriteDecPadded, eax, 3
     mov  edx, OFFSET colSep
     call WriteString
 
     mov  eax, i
-    lea  esi, menuNames                ; parallel pointer array
-    mov  edx, DWORD PTR [esi+eax*4]    ; indirect: name address
+    lea  esi, menuNames
+    mov  edx, DWORD PTR [esi+eax*4]
     INVOKE WritePadded, edx, 24
 
     mov  eax, i
@@ -991,11 +842,6 @@ PMT_Done:
     ret
 PrintMenuTable ENDP
 
-; ----------------------------------------------------------------------------
-; DrawTableGrid - proposal module 4 (display side).
-; Walks the 8 x 4 two-dimensional array with nested loops.  Offset is
-; computed as row * SEATS_PER_TABLE + column, the standard row-major form.
-; ----------------------------------------------------------------------------
 DrawTableGrid PROC USES esi
     LOCAL row:DWORD, col:DWORD
     mov  eax, COLOR_HEADER
@@ -1023,8 +869,8 @@ DT_Col:
     jae  DT_Status
 
     mov  eax, row
-    shl  eax, 2                        ; row * 4
-    add  eax, col                      ; + column
+    shl  eax, 2
+    add  eax, col
     lea  esi, tableSeats
     movzx eax, BYTE PTR [esi+eax]
     test eax, eax
@@ -1080,11 +926,6 @@ DT_Done:
     ret
 DrawTableGrid ENDP
 
-; ----------------------------------------------------------------------------
-; ReserveTable - proposal module 4 (reservation side).
-; Reads a table number and party size, checks availability through the 2-D
-; array, then marks every seat in that row occupied with REP STOSB.
-; ----------------------------------------------------------------------------
 ReserveTable PROC USES esi edi ebx
     LOCAL tableNo:DWORD, row:DWORD, party:DWORD, freeCount:DWORD
 
@@ -1097,7 +938,6 @@ ReserveTable PROC USES esi edi ebx
     call SetTextColor
     call DrawTableGrid
 
-    ; Count free tables; refuse early if the restaurant is full.
     call CountReservedTables
     mov  ebx, TABLE_COUNT
     sub  ebx, eax
@@ -1129,7 +969,7 @@ RT_Prompt:
     mov  tableNo, eax
     dec  eax
     mov  row, eax
-    shl  eax, 2
+    shl  eax, 2                         ; byte offset = row * 4
     lea  esi, tableSeats
     cmp  BYTE PTR [esi+eax], 0
     jne  RT_Occupied
@@ -1147,16 +987,14 @@ RT_Party:
     ja   RT_BadParty
     mov  party, eax
 
-    ; Mark the whole row occupied (a table is reserved exclusively).
     mov  eax, row
     shl  eax, 2
     lea  edi, tableSeats
     add  edi, eax
     mov  ecx, SEATS_PER_TABLE
     mov  al, 1
-    rep  stosb
+    rep  stosb                          ; mark all 4 seats occupied
 
-    ; Store the party size separately for display and the receipt.
     mov  eax, row
     lea  esi, tableParty
     mov  edx, party
@@ -1222,19 +1060,14 @@ RT_Cancelled:
     ret
 ReserveTable ENDP
 
-; ----------------------------------------------------------------------------
-; FindOrderLine - searches one table's order for a menu item.
-; Receives: tableIdx (0-based), itemIndex.
-; Returns:  EAX = line index within that table's order, or -1 if not present.
-; ----------------------------------------------------------------------------
 FindOrderLine PROC USES esi edx ecx, tableIdx:DWORD, itemIndex:DWORD
     mov  edx, itemIndex
     mov  eax, tableIdx
     lea  esi, orderLineCount
-    mov  ecx, DWORD PTR [esi+eax*4]    ; this table's line count
+    mov  ecx, DWORD PTR [esi+eax*4]
     mov  eax, tableIdx
     imul eax, MAX_ORDER_LINES
-    shl  eax, 2                        ; byte offset of this table's block
+    shl  eax, 2
     lea  esi, orderItem
     add  esi, eax
     xor  eax, eax
@@ -1251,19 +1084,10 @@ FOL_Done:
     ret
 FindOrderLine ENDP
 
-; ----------------------------------------------------------------------------
-; TakeOrder - proposal module 5 (per-table version).
-; Prompts for a reserved table and maintains that table's own order lines,
-; line count and subtotal.  Item numbers and quantities are validated against
-; stock, stock is decremented immediately, and the subtotal is accumulated
-; with MUL plus extended addition (ADD/ADC).  Entering 0 finishes ordering for
-; the selected table only; other tables keep their orders untouched.
-; ----------------------------------------------------------------------------
 TakeOrder PROC USES esi edi ebx
     LOCAL tableNo:DWORD, tableIdx:DWORD, itemIdx:DWORD, availStock:DWORD
     LOCAL qty:DWORD, lineTotal:DWORD, lineBase:DWORD, lineCount:DWORD
 
-    ; A table must be reserved before an order can be taken.
     call CountReservedTables
     test eax, eax
     jnz  TO_SelectTable
@@ -1340,9 +1164,8 @@ TO_Cancel:
     call WaitEnter
     ret
 
-; ---------------------------- Order entry loop -----------------------------
 TO_OrderLoop:
-    ; Load this table's line count and the byte offset of its line block.
+
     mov  eax, tableIdx
     lea  esi, orderLineCount
     mov  eax, DWORD PTR [esi+eax*4]
@@ -1396,14 +1219,12 @@ TO_OrderLoop:
     dec  eax
     mov  itemIdx, eax
 
-    ; Stock check (menuStock is a parallel array).
     lea  esi, menuStock
     mov  eax, DWORD PTR [esi+eax*4]
     test eax, eax
     jz   TO_OutOfStock
     mov  availStock, eax
 
-    ; Read the quantity and validate it against the remaining stock.
     mov  edx, OFFSET promptQty1
     call WriteString
     mov  eax, availStock
@@ -1413,14 +1234,13 @@ TO_OrderLoop:
     call ReadNumber
     jc   TO_BadQty
     test eax, eax
-    jz   TO_OrderLoop                  ; 0 = skip this item
+    jz   TO_OrderLoop
     cmp  eax, 1
     jb   TO_BadQty
     cmp  eax, availStock
     ja   TO_BadQty
     mov  qty, eax
 
-    ; If the item is already on this table's order, combine the quantities.
     INVOKE FindOrderLine, tableIdx, itemIdx
     cmp  eax, -1
     je   TO_NewLine
@@ -1449,28 +1269,26 @@ TO_NewLine:
     inc  DWORD PTR [esi+ecx*4]
 
 TO_UpdateStock:
-    ; Decrement inventory immediately (proposal: update quantity).
+
     mov  eax, itemIdx
     lea  esi, menuStock
     mov  edx, qty
     sub  DWORD PTR [esi+eax*4], edx
 
-    ; Line total = price * quantity, then add to this table's 64-bit subtotal.
     mov  eax, itemIdx
     lea  esi, menuPrices
     mov  eax, DWORD PTR [esi+eax*4]
     mov  ecx, qty
-    mul  ecx                           ; EDX:EAX = price * qty
+    mul  ecx
     mov  lineTotal, eax
-    mov  ebx, edx                      ; high word for ADC
+    mov  ebx, edx
     mov  eax, tableIdx
     lea  esi, orderSubtotalLo
     mov  ecx, lineTotal
-    add  DWORD PTR [esi+eax*4], ecx    ; extended addition: low + carry
+    add  DWORD PTR [esi+eax*4], ecx
     lea  esi, orderSubtotalHi
     adc  DWORD PTR [esi+eax*4], ebx
 
-    ; Feedback for the added item.
     mov  edx, OFFSET msgAdded
     call WriteString
     mov  eax, itemIdx
@@ -1537,15 +1355,13 @@ TO_OrderFull:
     call WaitEnter
     jmp  TO_OrderLoop
 
-; ---------------------------- Finish ordering ------------------------------
 TO_Finish:
-    ; Only this table's line count is inspected.
+
     mov  eax, tableIdx
     lea  esi, orderLineCount
     cmp  DWORD PTR [esi+eax*4], 0
     jne  TO_FinishWithItems
 
-    ; Empty order: nothing was added; the table stays reserved.
     call ClearScreen
     mov  eax, COLOR_DIM
     call SetTextColor
@@ -1581,18 +1397,6 @@ TO_FinishWithItems:
     ret
 TakeOrder ENDP
 
-; ----------------------------------------------------------------------------
-; ComputeBill - proposal module 6 (per-table version).
-; Receives: tableIdx (0-based).
-; Publishes:
-;   billSubtotal, billTax, billDiscount, billFinal, billPoints.
-;   - Tax:      subtotal * TAX_PERCENT / 100   (MUL then DIV)
-;   - Discount: subtotal >> 2 when >= 3000     (SHR = 25% promo)
-;   - Final:    subtotal + tax - discount
-;   - Points:   recursive CalcLoyaltyPoints
-; The subtotal read here belongs only to the requested table and was
-; accumulated with ADD/ADC (extended addition).
-; ----------------------------------------------------------------------------
 ComputeBill PROC USES ebx esi, tableIdx:DWORD
     LOCAL subtotal:DWORD, taxAmt:DWORD, discountAmt:DWORD
     LOCAL finalAmt:DWORD, points:DWORD
@@ -1602,34 +1406,29 @@ ComputeBill PROC USES ebx esi, tableIdx:DWORD
     mov  eax, DWORD PTR [esi+eax*4]
     mov  subtotal, eax
 
-    ; tax = subtotal * 5 / 100
     mov  eax, subtotal
     mov  ebx, TAX_PERCENT
-    mul  ebx                           ; EDX:EAX = subtotal * 5
+    mul  ebx                            ; tax = subtotal * 5 / 100
     mov  ecx, 100
-    div  ecx                           ; EAX = quotient (tax)
+    div  ecx
     mov  taxAmt, eax
 
-    ; 25% promotional discount using a bit shift (SHR by 2).
     mov  discountAmt, 0
     mov  eax, subtotal
     cmp  eax, DISC_THRESHOLD
     jb   CB_NoDiscount
-    shr  eax, 2
+    shr  eax, 2                         ; 25% discount = subtotal / 4
     mov  discountAmt, eax
 CB_NoDiscount:
 
-    ; final = subtotal + tax - discount
     mov  eax, subtotal
     add  eax, taxAmt
     sub  eax, discountAmt
     mov  finalAmt, eax
 
-    ; Recursive loyalty points: one point per complete Rs. 100.
     INVOKE CalcLoyaltyPoints, subtotal
     mov  points, eax
 
-    ; Publish results for the receipt.
     mov  eax, subtotal
     mov  billSubtotal, eax
     mov  eax, taxAmt
@@ -1643,13 +1442,7 @@ CB_NoDiscount:
     ret
 ComputeBill ENDP
 
-; ----------------------------------------------------------------------------
-; CalcLoyaltyPoints - recursive loyalty calculation (proposal module 7).
-; Receives: total (DWORD).  Returns: EAX = total / 100, computed as
-;   0                         if total < 100
-;   1 + CalcLoyaltyPoints(total - 100)   otherwise
-; A stack frame and a recursive INVOKE are used deliberately.
-; ----------------------------------------------------------------------------
+; recursive: one point per complete Rs. 100
 CalcLoyaltyPoints PROC total:DWORD
     mov  eax, total
 
@@ -1657,7 +1450,7 @@ CalcLoyaltyPoints PROC total:DWORD
     jb   CLP_Zero
 
     sub  eax, POINTS_UNIT
-    INVOKE CalcLoyaltyPoints, eax      ; recursive call
+    INVOKE CalcLoyaltyPoints, eax       ; recursive call
     inc  eax
     ret
 
@@ -1666,12 +1459,6 @@ CLP_Zero:
     ret
 CalcLoyaltyPoints ENDP
 
-; ----------------------------------------------------------------------------
-; PrintReceipt - proposal module 7 (formatting side).
-; Receives: tableIdx (0-based).  Prints that table's order lines, then
-; subtotal, discount, tax, final balance and loyalty points.  ComputeBill
-; publishes the totals for the same table.
-; ----------------------------------------------------------------------------
 PrintReceipt PROC USES esi edi, tableIdx:DWORD
     LOCAL i:DWORD, itemIdx:DWORD, qty:DWORD, price:DWORD, lineTotal:DWORD
     LOCAL lineBase:DWORD, lineCount:DWORD
@@ -1686,7 +1473,6 @@ PrintReceipt PROC USES esi edi, tableIdx:DWORD
     mov  eax, COLOR_NORMAL
     call SetTextColor
 
-    ; Receipt number, table and party size for the selected table.
     mov  edx, OFFSET metaReceipt
     call WriteString
     mov  eax, receiptNo
@@ -1709,7 +1495,6 @@ PrintReceipt PROC USES esi edi, tableIdx:DWORD
     mov  edx, OFFSET receiptDivider
     call WriteString
 
-    ; Prepare this table's line count and line-block base offset.
     mov  eax, tableIdx
     lea  esi, orderLineCount
     mov  eax, DWORD PTR [esi+eax*4]
@@ -1719,7 +1504,6 @@ PrintReceipt PROC USES esi edi, tableIdx:DWORD
     shl  eax, 2
     mov  lineBase, eax
 
-    ; Itemised lines.
     mov  i, 0
 PR_Loop:
     mov  eax, i
@@ -1765,14 +1549,12 @@ PR_LinesDone:
     mov  edx, OFFSET receiptDivider
     call WriteString
 
-    ; Subtotal.
     mov  edx, OFFSET lblSubtotal
     INVOKE WritePadded, edx, 44
     mov  eax, billSubtotal
     INVOKE WriteDecPadded, eax, 12
     call Crlf
 
-    ; Discount (promo or not applicable).
     cmp  billDiscount, 0
     jne  PR_DiscountPromo
     mov  edx, OFFSET lblDiscountNone
@@ -1785,7 +1567,6 @@ PR_DiscountLabel:
     INVOKE WriteDecPadded, eax, 12
     call Crlf
 
-    ; Tax.
     mov  edx, OFFSET lblTax
     INVOKE WritePadded, edx, 44
     mov  eax, billTax
@@ -1795,7 +1576,6 @@ PR_DiscountLabel:
     mov  edx, OFFSET receiptDivider
     call WriteString
 
-    ; Final balance, highlighted.
     mov  eax, COLOR_HEADER
     call SetTextColor
     mov  edx, OFFSET lblFinal
@@ -1806,7 +1586,6 @@ PR_DiscountLabel:
     mov  eax, COLOR_NORMAL
     call SetTextColor
 
-    ; Loyalty points.
     mov  edx, OFFSET lblPoints
     INVOKE WritePadded, edx, 44
     mov  eax, billPoints
@@ -1820,16 +1599,9 @@ PR_DiscountLabel:
     ret
 PrintReceipt ENDP
 
-; ----------------------------------------------------------------------------
-; GenerateReceipt - per-table billing.
-; The administrator chooses the table to bill.  Only that table's order is
-; printed, filed and finalized, so other tables keep their orders and
-; reservations.  Receipt numbers are issued per bill.
-; ----------------------------------------------------------------------------
 GenerateReceipt PROC USES esi ebx
     LOCAL tableNo:DWORD, tableIdx:DWORD
 
-    ; Nothing to bill if no table has an order.
     call CountActiveOrders
     test eax, eax
     jz   GR_None
@@ -1862,8 +1634,6 @@ GR_Prompt:
     dec  eax
     mov  tableIdx, eax
 
-    ; Billing requires an order for this table.  Reservation alone is not
-    ; enough: a reserved table with no order lines cannot be billed.
     lea  esi, orderLineCount
     mov  eax, tableIdx
     cmp  DWORD PTR [esi+eax*4], 0
@@ -1915,14 +1685,8 @@ GR_None:
     ret
 GenerateReceipt ENDP
 
-; ----------------------------------------------------------------------------
-; FinalizeOrder - releases one table after its bill is paid.
-; Receives: tableIdx (0-based).  Frees that table's seats, clears that
-; table's party size, order lines, line count and subtotal, and advances the
-; receipt number.  Other tables are not touched.  Stock remains reduced.
-; ----------------------------------------------------------------------------
 FinalizeOrder PROC USES esi edi ebx, tableIdx:DWORD
-    ; Free the selected table's row in the 2-D seat array.
+
     mov  eax, tableIdx
     shl  eax, 2
     lea  edi, tableSeats
@@ -1931,12 +1695,10 @@ FinalizeOrder PROC USES esi edi ebx, tableIdx:DWORD
     xor  eax, eax
     rep  stosb
 
-    ; Clear the party size for this table only.
     mov  eax, tableIdx
     lea  esi, tableParty
     mov  BYTE PTR [esi+eax], 0
 
-    ; Clear this table's line count and 64-bit subtotal.
     lea  esi, orderLineCount
     mov  DWORD PTR [esi+eax*4], 0
     lea  esi, orderSubtotalLo
@@ -1944,7 +1706,6 @@ FinalizeOrder PROC USES esi edi ebx, tableIdx:DWORD
     lea  esi, orderSubtotalHi
     mov  DWORD PTR [esi+eax*4], 0
 
-    ; Wipe this table's order storage so no stale lines survive.
     mov  eax, tableIdx
     imul eax, MAX_ORDER_LINES
     shl  eax, 2
@@ -1967,10 +1728,6 @@ FinalizeOrder PROC USES esi edi ebx, tableIdx:DWORD
     ret
 FinalizeOrder ENDP
 
-; ----------------------------------------------------------------------------
-; UIntToStr - converts an unsigned 32-bit value to a null-terminated string.
-; Receives: value, pBuffer.  Returns: EAX = number of characters written.
-; ----------------------------------------------------------------------------
 UIntToStr PROC USES ebx ecx edx edi, value:DWORD, pBuffer:PTR BYTE
     mov  eax, value
     mov  edi, pBuffer
@@ -1982,17 +1739,17 @@ UIntToStr PROC USES ebx ecx edx edi, value:DWORD, pBuffer:PTR BYTE
     ret
 
 UTS_NonZero:
-    xor  ecx, ecx                      ; digit count
+    xor  ecx, ecx
     mov  ebx, 10
 UTS_DivLoop:
     xor  edx, edx
-    div  ebx                           ; EAX = quotient, EDX = remainder
+    div  ebx
     push edx
     inc  ecx
     test eax, eax
     jnz  UTS_DivLoop
 
-    mov  eax, ecx                      ; return length
+    mov  eax, ecx
 UTS_StoreLoop:
     pop  edx
     add  dl, '0'
@@ -2004,10 +1761,6 @@ UTS_StoreLoop:
     ret
 UIntToStr ENDP
 
-; ----------------------------------------------------------------------------
-; WriteStrToFile - writes a null-terminated string to an open file handle.
-; Receives: hFile, pString.
-; ----------------------------------------------------------------------------
 WriteStrToFile PROC USES eax ecx edx, hFile:DWORD, pString:PTR BYTE
     LOCAL bytesWritten:DWORD
     INVOKE Str_length, pString
@@ -2018,22 +1771,12 @@ WSTF_Done:
     ret
 WriteStrToFile ENDP
 
-; ----------------------------------------------------------------------------
-; WriteDecToFile - writes an unsigned decimal value to an open file handle.
-; Receives: hFile, value.
-; ----------------------------------------------------------------------------
 WriteDecToFile PROC USES eax, hFile:DWORD, value:DWORD
     INVOKE UIntToStr, value, ADDR numStrBuffer
     INVOKE WriteStrToFile, hFile, ADDR numStrBuffer
     ret
 WriteDecToFile ENDP
 
-; ----------------------------------------------------------------------------
-; AppendReceiptToFile - filing feature.
-; Receives: tableIdx (0-based).  Appends a formatted record for that table's
-; current receipt to records.txt.  Called after PrintReceipt (bill totals
-; computed) and before FinalizeOrder.
-; ----------------------------------------------------------------------------
 AppendReceiptToFile PROC USES eax ebx ecx edx esi edi, tableIdx:DWORD
     LOCAL hFile:DWORD
     LOCAL i:DWORD
@@ -2050,16 +1793,13 @@ AppendReceiptToFile PROC USES eax ebx ecx edx esi edi, tableIdx:DWORD
     je   ARF_Error
     mov  hFile, eax
 
-    ; Move to end of file for append.
     INVOKE SetFilePointer, hFile, 0, NULL, FILE_END
 
-    ; Header
     INVOKE WriteStrToFile, hFile, ADDR fileRecSep
     INVOKE WriteStrToFile, hFile, ADDR fileRecTitle
     INVOKE WriteDecToFile, hFile, receiptNo
     INVOKE WriteStrToFile, hFile, ADDR fileNewLine
 
-    ; Table and guests (only the selected table's data is written).
     mov  eax, tableIdx
     inc  eax
     mov  tableNo, eax
@@ -2073,7 +1813,6 @@ AppendReceiptToFile PROC USES eax ebx ecx edx esi edi, tableIdx:DWORD
     INVOKE WriteDecToFile, hFile, guestCount
     INVOKE WriteStrToFile, hFile, ADDR fileNewLine
 
-    ; Prepare this table's line count and line-block base offset.
     mov  eax, tableIdx
     lea  esi, orderLineCount
     mov  eax, DWORD PTR [esi+eax*4]
@@ -2083,7 +1822,6 @@ AppendReceiptToFile PROC USES eax ebx ecx edx esi edi, tableIdx:DWORD
     shl  eax, 2
     mov  lineBase, eax
 
-    ; Item lines
     mov  i, 0
 ARF_ItemLoop:
     mov  eax, i
@@ -2126,7 +1864,7 @@ ARF_ItemLoop:
     jmp  ARF_ItemLoop
 
 ARF_ItemsDone:
-    ; Totals
+
     INVOKE WriteStrToFile, hFile, ADDR fileRecItems
     INVOKE WriteDecToFile, hFile, lineCount
     INVOKE WriteStrToFile, hFile, ADDR fileRecSubtotal
@@ -2158,10 +1896,6 @@ ARF_Error:
     ret
 AppendReceiptToFile ENDP
 
-; ----------------------------------------------------------------------------
-; ViewFiledRecords - filing feature.
-; Opens records.txt and displays its contents on screen.
-; ----------------------------------------------------------------------------
 ViewFiledRecords PROC USES eax ebx ecx edx esi edi
     LOCAL hFile:DWORD
     LOCAL bytesRead:DWORD
@@ -2207,11 +1941,6 @@ VFR_NoFile:
     ret
 ViewFiledRecords ENDP
 
-; ----------------------------------------------------------------------------
-; ToLowerChar - returns lowercase ASCII character in AL.
-; Receives: charVal (DWORD, low byte used).  Returns: EAX = lowercase char.
-; (The parameter is NOT named "ch" because CH is an x86 register name.)
-; ----------------------------------------------------------------------------
 ToLowerChar PROC charVal:DWORD
     mov  eax, charVal
     cmp  al, 'A'
@@ -2224,10 +1953,6 @@ TLC_Done:
     ret
 ToLowerChar ENDP
 
-; ----------------------------------------------------------------------------
-; StrContainsInsensitive - case-insensitive substring search.
-; Receives: pHaystack, pNeedle.  Returns: EAX = 1 if found, 0 otherwise.
-; ----------------------------------------------------------------------------
 StrContainsInsensitive PROC USES ebx ecx edx esi edi, pHaystack:PTR BYTE, pNeedle:PTR BYTE
     LOCAL hLen:DWORD
     LOCAL nLen:DWORD
@@ -2240,14 +1965,14 @@ StrContainsInsensitive PROC USES ebx ecx edx esi edi, pHaystack:PTR BYTE, pNeedl
     mov  nLen, eax
 
     cmp  nLen, 0
-    je   SCI_Found                     ; empty needle matches
+    je   SCI_Found
     mov  eax, hLen
     cmp  eax, nLen
     jb   SCI_NotFound
 
     mov  eax, hLen
     sub  eax, nLen
-    mov  ecx, eax                      ; max start index
+    mov  ecx, eax
     mov  i, 0
 
 SCI_Outer:
@@ -2292,10 +2017,6 @@ SCI_NotFound:
     ret
 StrContainsInsensitive ENDP
 
-; ----------------------------------------------------------------------------
-; SearchMenuItem - searching feature.
-; Searches menu items by item number or by name (case-insensitive substring).
-; ----------------------------------------------------------------------------
 SearchMenuItem PROC USES esi edi ebx
     LOCAL choice:DWORD
     LOCAL itemNo:DWORD
@@ -2354,7 +2075,6 @@ SM_ByNumber:
     dec  eax
     mov  i, eax
 
-    ; Print the single matching row
     mov  eax, i
     inc  eax
     INVOKE WriteDecPadded, eax, 3
@@ -2388,7 +2108,6 @@ SM_ByName:
     test eax, eax
     jz   SM_EmptyName
 
-    ; Trim leading spaces check: if all spaces, treat as empty
     lea  esi, searchBuf
 SM_TrimCheck:
     mov  al, BYTE PTR [esi]
@@ -2408,7 +2127,6 @@ SM_DoSearch:
     mov  found, 0
     mov  i, 0
 
-    ; Search all items
 SM_SearchLoop:
     mov  eax, i
     cmp  eax, MAX_ITEMS
@@ -2416,12 +2134,11 @@ SM_SearchLoop:
 
     lea  esi, menuNames
     mov  eax, i
-    mov  edx, DWORD PTR [esi+eax*4]    ; item name
+    mov  edx, DWORD PTR [esi+eax*4]
     INVOKE StrContainsInsensitive, edx, pNeedle
     test eax, eax
     jz   SM_SearchNext
 
-    ; First match: print header
     cmp  found, 0
     jne  SM_PrintMatch
     mov  found, 1
@@ -2510,9 +2227,6 @@ SM_Done:
     ret
 SearchMenuItem ENDP
 
-; ----------------------------------------------------------------------------
-; Goodbye - final screen before ExitProcess.
-; ----------------------------------------------------------------------------
 Goodbye PROC
     call ClearScreen
     mov  eax, COLOR_SUCCESS
