@@ -1,19 +1,3 @@
-; ============================================================================
-;  Shaheer Ismail Khan (25K-0676) - Menu & Program Flow
-;  Procedures (14): AdminLogin, ReadPassword, ReadKeyWait, ReadNumber,
-;  VerifyString, ShowMainMenu, ShowStatusLine, ClearScreen, WaitEnter,
-;  PrintMenuTable, WritePadded, WriteDecPadded, ViewMenu, Goodbye
-;
-;  NOTE: These procedures rely on the shared constants, .data strings and
-;  PROTOs from the main file, and ShowStatusLine calls CountActiveOrders and
-;  CountReservedTables, which belong to another member's section.
-; ============================================================================
-
-; ----------------------------------------------------------------------------
-; AdminLogin - proposal module 1.
-; Reads a username and a masked password and verifies both with CMPSB
-; (inside VerifyString).  The login repeats until the credentials match.
-; ----------------------------------------------------------------------------
 AdminLogin PROC
 LoginRetry:
     call ClearScreen
@@ -39,13 +23,11 @@ LoginRetry:
     call WriteString
     INVOKE ReadPassword, OFFSET passBuf, 32
 
-    ; Verify the username with CMPSB.
-    INVOKE Str_length, OFFSET userBuf  ; EAX = entered length
+    INVOKE Str_length, OFFSET userBuf
     INVOKE VerifyString, OFFSET adminUser, OFFSET userBuf, ADMIN_USER_LEN, eax
     test eax, eax
     jz   LoginFailed
 
-    ; Verify the password with CMPSB.
     INVOKE Str_length, OFFSET passBuf
     INVOKE VerifyString, OFFSET adminPass, OFFSET passBuf, ADMIN_PASS_LEN, eax
     test eax, eax
@@ -73,13 +55,6 @@ LoginFailed:
     jmp  LoginRetry
 AdminLogin ENDP
 
-; ----------------------------------------------------------------------------
-; ReadKeyWait - blocking key read that does not flush pending input.
-; Irvine32's ReadKey calls ReadKeyFlush after every key, so fast typing (or a
-; paste) into ReadChar loses characters.  Reading the console input record
-; directly preserves every queued keystroke.
-; Returns: EAX = ASCII code (0 for special/extended keys).
-; ----------------------------------------------------------------------------
 ReadKeyWait PROC USES ebx
     LOCAL hIn:DWORD
     LOCAL rec:INPUT_RECORD
@@ -100,30 +75,24 @@ RKW_Retry:
     ret
 ReadKeyWait ENDP
 
-; ----------------------------------------------------------------------------
-; ReadPassword - reads a masked line using ReadKeyWait.
-; Receives: pBuffer = destination, maxLen = maximum characters.
-; Returns:  EAX = number of characters stored.
-; Backspace erases, Enter terminates, printable ASCII is echoed as '*'.
-; ----------------------------------------------------------------------------
 ReadPassword PROC USES esi, pBuffer:PTR BYTE, maxLen:DWORD
     LOCAL count:DWORD
 
     mov  count, 0
     mov  esi, pBuffer
 RP_Loop:
-    call ReadKeyWait                   ; AL = ASCII code
-    cmp  al, 13                        ; Enter?
+    call ReadKeyWait
+    cmp  al, 13
     je   RP_Done
-    cmp  al, 8                         ; Backspace?
+    cmp  al, 8
     je   RP_Backspace
-    cmp  al, 32                        ; ignore control characters
+    cmp  al, 32
     jb   RP_Loop
     cmp  al, 126
     ja   RP_Loop
     mov  ecx, count
     cmp  ecx, maxLen
-    jae  RP_Loop                       ; buffer full: ignore extra keys
+    jae  RP_Loop
     mov  BYTE PTR [esi+ecx], al
     inc  count
     mov  al, '*'
@@ -134,7 +103,7 @@ RP_Backspace:
     cmp  count, 0
     je   RP_Loop
     dec  count
-    mov  al, 8                         ; move back, erase, move back again
+    mov  al, 8
     call WriteChar
     mov  al, ' '
     call WriteChar
@@ -150,21 +119,13 @@ RP_Done:
     ret
 ReadPassword ENDP
 
-; ----------------------------------------------------------------------------
-; ReadNumber - reads and strictly validates an unsigned decimal number.
-; Irvine32's ReadDec returns 0 with CF clear when the text is not numeric,
-; which would silently turn "abc" into 0 (a cancel/finish request).  This
-; routine reads a whole line, accepts optional leading/trailing spaces, and
-; sets CF when the line is empty, contains a non-digit, or overflows 32 bits.
-; Returns: EAX = value, CF = 0;  EAX = 0, CF = 1 on error.
-; ----------------------------------------------------------------------------
 ReadNumber PROC USES esi ebx
     LOCAL buf[16]:BYTE
     LOCAL digit:DWORD
 
     lea  edx, buf
-    mov  ecx, 12                       ; up to 11 digits + null terminator
-    call ReadString                    ; EAX = characters read
+    mov  ecx, 12
+    call ReadString
     mov  ecx, eax
     test ecx, ecx
     jz   RN_Error
@@ -184,7 +145,7 @@ RN_SkipLead:
     jmp  RN_Lead
 
 RN_Start:
-    xor  eax, eax                      ; accumulator
+    xor  eax, eax
 RN_Digit:
     movzx edx, BYTE PTR [esi]
     cmp  dl, ' '
@@ -193,12 +154,12 @@ RN_Digit:
     je   RN_Trail
     sub  edx, '0'
     cmp  edx, 9
-    ja   RN_Error                      ; not a decimal digit
+    ja   RN_Error
     mov  digit, edx
     mov  ebx, 10
-    mul  ebx                           ; EAX = EAX * 10
+    mul  ebx
     test edx, edx
-    jnz  RN_Error                      ; overflow past 32 bits
+    jnz  RN_Error
     add  eax, digit
     jc   RN_Error
     inc  esi
@@ -211,7 +172,7 @@ RN_Trail:
     cmp  dl, ' '
     je   RN_TrailNext
     cmp  dl, 9
-    jne  RN_Error                      ; junk after the number
+    jne  RN_Error
 RN_TrailNext:
     inc  esi
     dec  ecx
@@ -227,24 +188,19 @@ RN_Error:
     ret
 ReadNumber ENDP
 
-; ----------------------------------------------------------------------------
-; VerifyString - exact byte comparison using CMPSB.
-; Receives: pStored, pEntered, storedLen, enteredLen.
-; Returns:  EAX = 1 if equal, 0 otherwise.
-; ----------------------------------------------------------------------------
 VerifyString PROC USES esi edi ecx, pStored:PTR BYTE, pEntered:PTR BYTE, storedLen:DWORD, enteredLen:DWORD
     mov  eax, 0
     mov  ecx, storedLen
     cmp  ecx, enteredLen
-    jne  VS_Done                       ; different lengths cannot match
+    jne  VS_Done
     test ecx, ecx
     jz   VS_Match
 
     mov  esi, pStored
     mov  edi, pEntered
     cld
-    repe cmpsb                         ; compare bytes while equal
-    jne  VS_Done                       ; ZF=0 means a mismatch
+    repe cmpsb
+    jne  VS_Done
 
 VS_Match:
     mov  eax, 1
@@ -252,11 +208,6 @@ VS_Done:
     ret
 VerifyString ENDP
 
-; ----------------------------------------------------------------------------
-; ShowMainMenu - proposal module 2.
-; Draws the main menu, shows status, reads a validated choice 1..7.
-; Returns: EAX = choice.
-; ----------------------------------------------------------------------------
 ShowMainMenu PROC
 MenuRetry:
     call ClearScreen
@@ -295,9 +246,6 @@ MenuBad:
     jmp  MenuRetry
 ShowMainMenu ENDP
 
-; ----------------------------------------------------------------------------
-; ShowStatusLine - one-line status of orders, reservations and receipts.
-; ----------------------------------------------------------------------------
 ShowStatusLine PROC
     mov  eax, COLOR_DIM
     call SetTextColor
@@ -330,7 +278,7 @@ SSL_Tables:
     mov  edx, OFFSET msgReceipts
     call WriteString
     mov  eax, receiptNo
-    dec  eax                           ; receipts already issued
+    dec  eax
     call WriteDec
     call Crlf
 
@@ -339,10 +287,6 @@ SSL_Tables:
     ret
 ShowStatusLine ENDP
 
-; ----------------------------------------------------------------------------
-; WritePadded - writes a null-terminated string then pads with spaces.
-; Receives: pString, fieldWidth.  If the string is longer, nothing is padded.
-; ----------------------------------------------------------------------------
 WritePadded PROC pString:PTR BYTE, fieldWidth:DWORD
     LOCAL len:DWORD, pad:DWORD
     INVOKE Str_length, pString
@@ -352,7 +296,7 @@ WritePadded PROC pString:PTR BYTE, fieldWidth:DWORD
 
     mov  eax, fieldWidth
     sub  eax, len
-    jbe  WP_Done                       ; fieldWidth <= length
+    jbe  WP_Done
     mov  pad, eax
 WP_Spaces:
     mov  al, ' '
@@ -363,10 +307,6 @@ WP_Done:
     ret
 WritePadded ENDP
 
-; ----------------------------------------------------------------------------
-; WriteDecPadded - writes an unsigned decimal right-aligned in a field.
-; Receives: value, fieldWidth.
-; ----------------------------------------------------------------------------
 WriteDecPadded PROC USES ebx, value:DWORD, fieldWidth:DWORD
     LOCAL digits:DWORD, pad:DWORD, val:DWORD
     mov  eax, value
@@ -397,13 +337,6 @@ WDP_Value:
     ret
 WriteDecPadded ENDP
 
-; ----------------------------------------------------------------------------
-; ClearScreen - clears only the visible console window.
-; Irvine32's Clrscr writes blanks to every line of the console buffer.  The
-; default Windows console buffer is 9001 lines, which makes Clrscr take several
-; seconds.  This routine clears just the visible window (about 30 lines) and
-; homes the cursor, so every menu redraw is instant.
-; ----------------------------------------------------------------------------
 ClearScreen PROC USES edi ebx
     LOCAL info:CONSOLE_SCREEN_BUFFER_INFO
     LOCAL origin:COORD
@@ -415,7 +348,6 @@ ClearScreen PROC USES edi ebx
     mov  ebx, eax
     INVOKE GetConsoleScreenBufferInfo, ebx, ADDR info
 
-    ; width = visible window width, capped at MAX_CLEAR_COLS
     movzx eax, info.srWindow.Right
     movzx ecx, info.srWindow.Left
     sub  eax, ecx
@@ -426,13 +358,11 @@ ClearScreen PROC USES edi ebx
 CS_WidthOK:
     mov  fieldWidth, eax
 
-    ; Fill the attribute buffer with the current console attribute.
     mov  ax, info.wAttributes
     mov  ecx, fieldWidth
     mov  edi, OFFSET clearAttribs
     rep  stosw
 
-    ; Clear each visible row.
     mov  origin.X, 0
     movzx eax, info.srWindow.Top
     mov  row, eax
@@ -455,13 +385,6 @@ CS_Done:
     ret
 ClearScreen ENDP
 
-; ----------------------------------------------------------------------------
-; WaitEnter - replacement for Irvine32 WaitMsg.
-; WaitMsg uses ReadChar, and ReadChar's ReadKey flushes the console input
-; buffer after every poll.  A key that arrives just before a flush is lost.
-; This routine uses ReadKeyWait, which never flushes, so a key press is never
-; dropped.  The prompt text matches WaitMsg exactly.
-; ----------------------------------------------------------------------------
 WaitEnter PROC
     mov  edx, OFFSET msgPressAnyKey
     call WriteString
@@ -470,11 +393,6 @@ WaitEnter PROC
     ret
 WaitEnter ENDP
 
-; ----------------------------------------------------------------------------
-; ViewMenu - proposal module 3.
-; Displays item names, prices and stock.  Names are reached indirectly
-; through menuNames, while prices/stock are parallel DWORD arrays.
-; ----------------------------------------------------------------------------
 ViewMenu PROC
     call ClearScreen
     mov  eax, COLOR_HEADER
@@ -496,9 +414,6 @@ ViewMenu PROC
     ret
 ViewMenu ENDP
 
-; ----------------------------------------------------------------------------
-; PrintMenuTable - prints the menu rows (no clearing, no pause).
-; ----------------------------------------------------------------------------
 PrintMenuTable PROC USES esi
     LOCAL i:DWORD
     mov  eax, COLOR_HEADER
@@ -514,14 +429,14 @@ PMT_Loop:
     cmp  eax, MAX_ITEMS
     jae  PMT_Done
 
-    inc  eax                           ; display item number as 1..10
+    inc  eax
     INVOKE WriteDecPadded, eax, 3
     mov  edx, OFFSET colSep
     call WriteString
 
     mov  eax, i
-    lea  esi, menuNames                ; parallel pointer array
-    mov  edx, DWORD PTR [esi+eax*4]    ; indirect: name address
+    lea  esi, menuNames
+    mov  edx, DWORD PTR [esi+eax*4]
     INVOKE WritePadded, edx, 24
 
     mov  eax, i
@@ -543,9 +458,6 @@ PMT_Done:
     ret
 PrintMenuTable ENDP
 
-; ----------------------------------------------------------------------------
-; Goodbye - final screen before ExitProcess.
-; ----------------------------------------------------------------------------
 Goodbye PROC
     call ClearScreen
     mov  eax, COLOR_SUCCESS
