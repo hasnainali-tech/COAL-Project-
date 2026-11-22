@@ -1,0 +1,911 @@
+CountReservedTables PROC USES esi
+    LOCAL count:DWORD, row:DWORD
+    mov  count, 0
+    mov  row, 0
+CRT_Loop:
+    mov  eax, row
+    cmp  eax, TABLE_COUNT
+    jae  CRT_Done
+    shl  eax, 2
+    lea  esi, tableSeats
+    cmp  BYTE PTR [esi+eax], 0
+    je   CRT_Next
+    inc  count
+CRT_Next:
+    inc  row
+    jmp  CRT_Loop
+CRT_Done:
+    mov  eax, count
+    ret
+CountReservedTables ENDP
+
+
+
+
+CountActiveOrders PROC USES esi
+    LOCAL count:DWORD, idx:DWORD
+    mov  count, 0
+    mov  idx, 0
+CAO_Loop:
+    mov  eax, idx
+    cmp  eax, TABLE_COUNT
+    jae  CAO_Done
+    lea  esi, orderLineCount
+    cmp  DWORD PTR [esi+eax*4], 0
+    je   CAO_Next
+    inc  count
+CAO_Next:
+    inc  idx
+    jmp  CAO_Loop
+CAO_Done:
+    mov  eax, count
+    ret
+CountActiveOrders ENDP
+
+
+
+
+ShowTablesWithOrders PROC USES esi ebx
+    mov  eax, COLOR_DIM
+    call SetTextColor
+    mov  edx, OFFSET msgTablesWithOrders
+    call WriteString
+    xor  ebx, ebx
+STWO_Loop:
+    cmp  ebx, TABLE_COUNT
+    jae  STWO_Done
+    lea  esi, orderLineCount
+    cmp  DWORD PTR [esi+ebx*4], 0
+    je   STWO_Next
+    mov  eax, ebx
+    inc  eax
+    call WriteDec
+    mov  al, ' '
+    call WriteChar
+STWO_Next:
+    inc  ebx
+    jmp  STWO_Loop
+STWO_Done:
+    call Crlf
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+    ret
+ShowTablesWithOrders ENDP
+
+
+
+
+
+
+DrawTableGrid PROC USES esi
+    LOCAL row:DWORD, col:DWORD
+    mov  eax, COLOR_HEADER
+    call SetTextColor
+    mov  edx, OFFSET tableGridHeader
+    call WriteString
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+
+    mov  row, 0
+DT_Row:
+    mov  eax, row
+    cmp  eax, TABLE_COUNT
+    jae  DT_Done
+
+    inc  eax
+    INVOKE WriteDecPadded, eax, 4
+    mov  edx, OFFSET gridBar
+    call WriteString
+
+    mov  col, 0
+DT_Col:
+    mov  eax, col
+    cmp  eax, SEATS_PER_TABLE
+    jae  DT_Status
+
+    mov  eax, row
+    shl  eax, 2
+    add  eax, col
+    lea  esi, tableSeats
+    movzx eax, BYTE PTR [esi+eax]
+    test eax, eax
+    jz   DT_FreeSeat
+    mov  al, 'X'
+    jmp  DT_PrintSeat
+DT_FreeSeat:
+    mov  al, '.'
+DT_PrintSeat:
+    call WriteChar
+    mov  al, ' '
+    call WriteChar
+    inc  col
+    jmp  DT_Col
+
+DT_Status:
+    mov  edx, OFFSET gridBar
+    call WriteString
+    mov  eax, row
+    shl  eax, 2
+    lea  esi, tableSeats
+    cmp  BYTE PTR [esi+eax], 0
+    je   DT_Available
+
+    mov  eax, COLOR_ERROR
+    call SetTextColor
+    mov  edx, OFFSET statusReserved
+    call WriteString
+    mov  eax, row
+    lea  esi, tableParty
+    movzx eax, BYTE PTR [esi+eax]
+    call WriteDec
+    mov  edx, OFFSET statusGuests
+    call WriteString
+    jmp  DT_Reset
+
+DT_Available:
+    mov  eax, COLOR_SUCCESS
+    call SetTextColor
+    mov  edx, OFFSET statusAvailable
+    call WriteString
+
+DT_Reset:
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+    call Crlf
+    inc  row
+    jmp  DT_Row
+
+DT_Done:
+    mov  edx, OFFSET gridLegend
+    call WriteString
+    ret
+DrawTableGrid ENDP
+
+
+
+
+
+
+ReserveTable PROC USES esi edi ebx
+    LOCAL tableNo:DWORD, row:DWORD, party:DWORD, freeCount:DWORD
+
+    call ClearScreen
+    mov  eax, COLOR_HEADER
+    call SetTextColor
+    mov  edx, OFFSET tableTitle
+    call WriteString
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+    call DrawTableGrid
+
+    call CountReservedTables
+    mov  ebx, TABLE_COUNT
+    sub  ebx, eax
+    mov  freeCount, ebx
+    test ebx, ebx
+    jnz  RT_Prompt
+
+    mov  eax, COLOR_ERROR
+    call SetTextColor
+    mov  edx, OFFSET msgAllReserved
+    call WriteString
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+    call WaitEnter
+    ret
+
+RT_Prompt:
+    mov  edx, OFFSET promptTableNo
+    call WriteString
+    call ReadNumber
+    jc   RT_BadTable
+    test eax, eax
+    jz   RT_Cancelled
+    cmp  eax, 1
+    jb   RT_BadTable
+    cmp  eax, TABLE_COUNT
+    ja   RT_BadTable
+
+    mov  tableNo, eax
+    dec  eax
+    mov  row, eax
+    shl  eax, 2                         ; byte offset = row * 4
+    lea  esi, tableSeats
+    cmp  BYTE PTR [esi+eax], 0
+    jne  RT_Occupied
+
+RT_Party:
+    mov  edx, OFFSET promptParty
+    call WriteString
+    call ReadNumber
+    jc   RT_BadParty
+    test eax, eax
+    jz   RT_Cancelled
+    cmp  eax, 1
+    jb   RT_BadParty
+    cmp  eax, SEATS_PER_TABLE
+    ja   RT_BadParty
+    mov  party, eax
+
+    mov  eax, row
+    shl  eax, 2
+    lea  edi, tableSeats
+    add  edi, eax
+    mov  ecx, SEATS_PER_TABLE
+    mov  al, 1
+    rep  stosb                          ; mark all 4 seats occupied
+
+    mov  eax, row
+    lea  esi, tableParty
+    mov  edx, party
+    mov  BYTE PTR [esi+eax], dl
+
+    call ClearScreen
+    mov  eax, COLOR_SUCCESS
+    call SetTextColor
+    mov  edx, OFFSET msgReservedOK
+    call WriteString
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+    mov  edx, OFFSET msgTableLabel
+    call WriteString
+    mov  eax, tableNo
+    call WriteDec
+    mov  edx, OFFSET msgForLabel
+    call WriteString
+    mov  eax, party
+    call WriteDec
+    mov  edx, OFFSET msgGuestsLabel
+    call WriteString
+    call Crlf
+    call DrawTableGrid
+    call WaitEnter
+    ret
+
+RT_BadTable:
+    mov  eax, COLOR_ERROR
+    call SetTextColor
+    mov  edx, OFFSET msgInvalidTable
+    call WriteString
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+    jmp  RT_Prompt
+
+RT_Occupied:
+    mov  eax, COLOR_ERROR
+    call SetTextColor
+    mov  edx, OFFSET msgTableOccupied
+    call WriteString
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+    jmp  RT_Prompt
+
+RT_BadParty:
+    mov  eax, COLOR_ERROR
+    call SetTextColor
+    mov  edx, OFFSET msgInvalidParty
+    call WriteString
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+    jmp  RT_Party
+
+RT_Cancelled:
+    mov  eax, COLOR_DIM
+    call SetTextColor
+    mov  edx, OFFSET msgReservationCancelled
+    call WriteString
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+    call WaitEnter
+    ret
+ReserveTable ENDP
+
+
+
+
+
+FindOrderLine PROC USES esi edx ecx, tableIdx:DWORD, itemIndex:DWORD
+    mov  edx, itemIndex
+    mov  eax, tableIdx
+    lea  esi, orderLineCount
+    mov  ecx, DWORD PTR [esi+eax*4]
+    mov  eax, tableIdx
+    imul eax, MAX_ORDER_LINES
+    shl  eax, 2
+    lea  esi, orderItem
+    add  esi, eax
+    xor  eax, eax
+FOL_Loop:
+    cmp  eax, ecx
+    jae  FOL_NotFound
+    cmp  DWORD PTR [esi+eax*4], edx
+    je   FOL_Done
+    inc  eax
+    jmp  FOL_Loop
+FOL_NotFound:
+    mov  eax, -1
+FOL_Done:
+    ret
+FindOrderLine ENDP
+
+
+
+
+
+TakeOrder PROC USES esi edi ebx
+    LOCAL tableNo:DWORD, tableIdx:DWORD, itemIdx:DWORD, availStock:DWORD
+    LOCAL qty:DWORD, lineTotal:DWORD, lineBase:DWORD, lineCount:DWORD
+
+    call CountReservedTables
+    test eax, eax
+    jnz  TO_SelectTable
+
+    call ClearScreen
+    mov  eax, COLOR_ERROR
+    call SetTextColor
+    mov  edx, OFFSET msgNoReservedTables
+    call WriteString
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+    call WaitEnter
+    ret
+
+TO_SelectTable:
+    call ClearScreen
+    mov  eax, COLOR_HEADER
+    call SetTextColor
+    mov  edx, OFFSET orderTitle
+    call WriteString
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+    mov  edx, OFFSET msgSelectTable
+    call WriteString
+    call DrawTableGrid
+    call ShowTablesWithOrders
+
+TO_TablePrompt:
+    mov  edx, OFFSET promptOrderTable
+    call WriteString
+    call ReadNumber
+    jc   TO_BadTable
+    test eax, eax
+    jz   TO_Cancel
+    cmp  eax, 1
+    jb   TO_BadTable
+    cmp  eax, TABLE_COUNT
+    ja   TO_BadTable
+
+    mov  tableNo, eax
+    dec  eax
+    mov  tableIdx, eax
+    shl  eax, 2
+    lea  esi, tableSeats
+    cmp  BYTE PTR [esi+eax], 0
+    je   TO_TableNotReserved
+    jmp  TO_OrderLoop
+
+TO_BadTable:
+    mov  eax, COLOR_ERROR
+    call SetTextColor
+    mov  edx, OFFSET msgInvalidTable
+    call WriteString
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+    jmp  TO_TablePrompt
+
+TO_TableNotReserved:
+    mov  eax, COLOR_ERROR
+    call SetTextColor
+    mov  edx, OFFSET msgTableNotReserved
+    call WriteString
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+    jmp  TO_TablePrompt
+
+TO_Cancel:
+    mov  eax, COLOR_DIM
+    call SetTextColor
+    mov  edx, OFFSET msgOrderCancelled
+    call WriteString
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+    call WaitEnter
+    ret
+
+TO_OrderLoop:
+
+    mov  eax, tableIdx
+    lea  esi, orderLineCount
+    mov  eax, DWORD PTR [esi+eax*4]
+    mov  lineCount, eax
+    mov  eax, tableIdx
+    imul eax, MAX_ORDER_LINES
+    shl  eax, 2
+    mov  lineBase, eax
+
+    call ClearScreen
+    mov  eax, COLOR_HEADER
+    call SetTextColor
+    mov  edx, OFFSET orderTitle
+    call WriteString
+    mov  edx, OFFSET msgOrderForTable
+    call WriteString
+    mov  eax, tableNo
+    call WriteDec
+    call Crlf
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+
+    call PrintMenuTable
+
+    mov  eax, COLOR_DIM
+    call SetTextColor
+    mov  edx, OFFSET msgItemsCount
+    call WriteString
+    mov  eax, lineCount
+    call WriteDec
+    mov  edx, OFFSET msgRunning
+    call WriteString
+    mov  eax, tableIdx
+    lea  esi, orderSubtotalLo
+    mov  eax, DWORD PTR [esi+eax*4]
+    call WriteDec
+    call Crlf
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+
+    mov  edx, OFFSET promptItem
+    call WriteString
+    call ReadNumber
+    jc   TO_BadItem
+    test eax, eax
+    jz   TO_Finish
+    cmp  eax, 1
+    jb   TO_BadItem
+    cmp  eax, MAX_ITEMS
+    ja   TO_BadItem
+    dec  eax
+    mov  itemIdx, eax
+
+    lea  esi, menuStock
+    mov  eax, DWORD PTR [esi+eax*4]
+    test eax, eax
+    jz   TO_OutOfStock
+    mov  availStock, eax
+
+    mov  edx, OFFSET promptQty1
+    call WriteString
+    mov  eax, availStock
+    call WriteDec
+    mov  edx, OFFSET promptQty2
+    call WriteString
+    call ReadNumber
+    jc   TO_BadQty
+    test eax, eax
+    jz   TO_OrderLoop
+    cmp  eax, 1
+    jb   TO_BadQty
+    cmp  eax, availStock
+    ja   TO_BadQty
+    mov  qty, eax
+
+    INVOKE FindOrderLine, tableIdx, itemIdx
+    cmp  eax, -1
+    je   TO_NewLine
+    mov  ecx, lineBase
+    lea  esi, orderQty
+    add  esi, ecx
+    mov  edx, qty
+    add  DWORD PTR [esi+eax*4], edx
+    jmp  TO_UpdateStock
+
+TO_NewLine:
+    mov  eax, lineCount
+    cmp  eax, MAX_ORDER_LINES
+    jae  TO_OrderFull
+    mov  ecx, lineBase
+    lea  esi, orderItem
+    add  esi, ecx
+    mov  edx, itemIdx
+    mov  DWORD PTR [esi+eax*4], edx
+    lea  esi, orderQty
+    add  esi, ecx
+    mov  edx, qty
+    mov  DWORD PTR [esi+eax*4], edx
+    mov  ecx, tableIdx
+    lea  esi, orderLineCount
+    inc  DWORD PTR [esi+ecx*4]
+
+TO_UpdateStock:
+
+    mov  eax, itemIdx
+    lea  esi, menuStock
+    mov  edx, qty
+    sub  DWORD PTR [esi+eax*4], edx
+
+    mov  eax, itemIdx
+    lea  esi, menuPrices
+    mov  eax, DWORD PTR [esi+eax*4]
+    mov  ecx, qty
+    mul  ecx
+    mov  lineTotal, eax
+    mov  ebx, edx
+    mov  eax, tableIdx
+    lea  esi, orderSubtotalLo
+    mov  ecx, lineTotal
+    add  DWORD PTR [esi+eax*4], ecx
+    lea  esi, orderSubtotalHi
+    adc  DWORD PTR [esi+eax*4], ebx
+
+    mov  edx, OFFSET msgAdded
+    call WriteString
+    mov  eax, itemIdx
+    lea  esi, menuNames
+    mov  edx, DWORD PTR [esi+eax*4]
+    call WriteString
+    mov  edx, OFFSET msgTimes
+    call WriteString
+    mov  eax, qty
+    call WriteDec
+    mov  edx, OFFSET msgEquals
+    call WriteString
+    mov  eax, lineTotal
+    call WriteDec
+    call Crlf
+
+    mov  edx, OFFSET msgRunning
+    call WriteString
+    mov  eax, tableIdx
+    lea  esi, orderSubtotalLo
+    mov  eax, DWORD PTR [esi+eax*4]
+    call WriteDec
+    call Crlf
+    call WaitEnter
+    jmp  TO_OrderLoop
+
+TO_BadItem:
+    mov  eax, COLOR_ERROR
+    call SetTextColor
+    mov  edx, OFFSET msgInvalidItem
+    call WriteString
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+    call WaitEnter
+    jmp  TO_OrderLoop
+
+TO_OutOfStock:
+    mov  eax, COLOR_ERROR
+    call SetTextColor
+    mov  edx, OFFSET msgOutOfStock
+    call WriteString
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+    call WaitEnter
+    jmp  TO_OrderLoop
+
+TO_BadQty:
+    mov  eax, COLOR_ERROR
+    call SetTextColor
+    mov  edx, OFFSET msgInvalidQty
+    call WriteString
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+    call WaitEnter
+    jmp  TO_OrderLoop
+
+TO_OrderFull:
+    mov  eax, COLOR_ERROR
+    call SetTextColor
+    mov  edx, OFFSET msgOrderFull
+    call WriteString
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+    call WaitEnter
+    jmp  TO_OrderLoop
+
+TO_Finish:
+
+    mov  eax, tableIdx
+    lea  esi, orderLineCount
+    cmp  DWORD PTR [esi+eax*4], 0
+    jne  TO_FinishWithItems
+
+    call ClearScreen
+    mov  eax, COLOR_DIM
+    call SetTextColor
+    mov  edx, OFFSET msgOrderEmpty
+    call WriteString
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+    call WaitEnter
+    ret
+
+TO_FinishWithItems:
+    call ClearScreen
+    mov  eax, COLOR_SUCCESS
+    call SetTextColor
+    mov  edx, OFFSET msgOrderRecorded
+    call WriteString
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+    call Crlf
+    mov  edx, OFFSET msgOrderForTable
+    call WriteString
+    mov  eax, tableNo
+    call WriteDec
+    call Crlf
+    mov  edx, OFFSET msgRunning
+    call WriteString
+    mov  eax, tableIdx
+    lea  esi, orderSubtotalLo
+    mov  eax, DWORD PTR [esi+eax*4]
+    call WriteDec
+    call Crlf
+    call WaitEnter
+    ret
+TakeOrder ENDP
+
+
+
+
+
+
+
+FinalizeOrder PROC USES esi edi ebx, tableIdx:DWORD
+
+    mov  eax, tableIdx
+    shl  eax, 2
+    lea  edi, tableSeats
+    add  edi, eax
+    mov  ecx, SEATS_PER_TABLE
+    xor  eax, eax
+    rep  stosb
+
+    mov  eax, tableIdx
+    lea  esi, tableParty
+    mov  BYTE PTR [esi+eax], 0
+
+    lea  esi, orderLineCount
+    mov  DWORD PTR [esi+eax*4], 0
+    lea  esi, orderSubtotalLo
+    mov  DWORD PTR [esi+eax*4], 0
+    lea  esi, orderSubtotalHi
+    mov  DWORD PTR [esi+eax*4], 0
+
+    mov  eax, tableIdx
+    imul eax, MAX_ORDER_LINES
+    shl  eax, 2
+    lea  edi, orderItem
+    add  edi, eax
+    mov  ecx, MAX_ORDER_LINES
+    xor  eax, eax
+    rep  stosd
+
+    mov  eax, tableIdx
+    imul eax, MAX_ORDER_LINES
+    shl  eax, 2
+    lea  edi, orderQty
+    add  edi, eax
+    mov  ecx, MAX_ORDER_LINES
+    xor  eax, eax
+    rep  stosd
+
+    inc  receiptNo
+    ret
+FinalizeOrder ENDP
+
+
+
+
+
+
+
+SearchMenuItem PROC USES esi edi ebx
+    LOCAL choice:DWORD
+    LOCAL itemNo:DWORD
+    LOCAL i:DWORD
+    LOCAL found:DWORD
+    LOCAL inLen:DWORD
+    LOCAL pNeedle:PTR BYTE
+
+SM_Retry:
+    call ClearScreen
+    mov  eax, COLOR_HEADER
+    call SetTextColor
+    mov  edx, OFFSET searchTitle
+    call WriteString
+    mov  eax, COLOR_MENU
+    call SetTextColor
+    mov  edx, OFFSET searchMenu
+    call WriteString
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+
+    mov  edx, OFFSET promptSearchMode
+    call WriteString
+    call ReadNumber
+    jc   SM_BadMode
+    mov  choice, eax
+    cmp  eax, 0
+    je   SM_Done
+    cmp  eax, 1
+    je   SM_ByNumber
+    cmp  eax, 2
+    je   SM_ByName
+    jmp  SM_BadMode
+
+SM_ByNumber:
+    mov  edx, OFFSET promptSearchNum
+    call WriteString
+    call ReadNumber
+    jc   SM_BadNum
+    cmp  eax, 1
+    jb   SM_BadNum
+    cmp  eax, MAX_ITEMS
+    ja   SM_BadNum
+    mov  itemNo, eax
+
+    mov  eax, COLOR_HEADER
+    call SetTextColor
+    mov  edx, OFFSET msgSearchFound
+    call WriteString
+    mov  edx, OFFSET msgSearchHeader
+    call WriteString
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+
+    mov  eax, itemNo
+    dec  eax
+    mov  i, eax
+
+    mov  eax, i
+    inc  eax
+    INVOKE WriteDecPadded, eax, 3
+    mov  edx, OFFSET colSep
+    call WriteString
+    lea  esi, menuNames
+    mov  eax, i
+    mov  edx, DWORD PTR [esi+eax*4]
+    INVOKE WritePadded, edx, 24
+    lea  esi, menuPrices
+    mov  eax, i
+    mov  eax, DWORD PTR [esi+eax*4]
+    INVOKE WriteDecPadded, eax, 9
+    lea  esi, menuStock
+    mov  eax, i
+    mov  eax, DWORD PTR [esi+eax*4]
+    INVOKE WriteDecPadded, eax, 7
+    call Crlf
+    mov  edx, OFFSET menuDivider
+    call WriteString
+    call WaitEnter
+    ret
+
+SM_ByName:
+    mov  edx, OFFSET promptSearchName
+    call WriteString
+    mov  edx, OFFSET searchBuf
+    mov  ecx, SEARCH_BUF_SIZE - 1
+    call ReadString
+    mov  inLen, eax
+    test eax, eax
+    jz   SM_EmptyName
+
+    lea  esi, searchBuf
+SM_TrimCheck:
+    mov  al, BYTE PTR [esi]
+    cmp  al, 0
+    je   SM_EmptyName
+    cmp  al, ' '
+    je   SM_TrimNext
+    cmp  al, 9
+    je   SM_TrimNext
+    jmp  SM_DoSearch
+SM_TrimNext:
+    inc  esi
+    jmp  SM_TrimCheck
+
+SM_DoSearch:
+    mov  pNeedle, esi
+    mov  found, 0
+    mov  i, 0
+
+SM_SearchLoop:
+    mov  eax, i
+    cmp  eax, MAX_ITEMS
+    jae  SM_SearchDone
+
+    lea  esi, menuNames
+    mov  eax, i
+    mov  edx, DWORD PTR [esi+eax*4]
+    INVOKE StrContainsInsensitive, edx, pNeedle
+    test eax, eax
+    jz   SM_SearchNext
+
+    cmp  found, 0
+    jne  SM_PrintMatch
+    mov  found, 1
+    mov  eax, COLOR_HEADER
+    call SetTextColor
+    mov  edx, OFFSET msgSearchFound
+    call WriteString
+    mov  edx, OFFSET msgSearchHeader
+    call WriteString
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+
+SM_PrintMatch:
+    mov  eax, i
+    inc  eax
+    INVOKE WriteDecPadded, eax, 3
+    mov  edx, OFFSET colSep
+    call WriteString
+    lea  esi, menuNames
+    mov  eax, i
+    mov  edx, DWORD PTR [esi+eax*4]
+    INVOKE WritePadded, edx, 24
+    lea  esi, menuPrices
+    mov  eax, i
+    mov  eax, DWORD PTR [esi+eax*4]
+    INVOKE WriteDecPadded, eax, 9
+    lea  esi, menuStock
+    mov  eax, i
+    mov  eax, DWORD PTR [esi+eax*4]
+    INVOKE WriteDecPadded, eax, 7
+    call Crlf
+
+SM_SearchNext:
+    inc  i
+    jmp  SM_SearchLoop
+
+SM_SearchDone:
+    cmp  found, 0
+    je   SM_NoMatch
+    mov  edx, OFFSET menuDivider
+    call WriteString
+    call WaitEnter
+    ret
+
+SM_NoMatch:
+    mov  eax, COLOR_DIM
+    call SetTextColor
+    mov  edx, OFFSET msgSearchNone
+    call WriteString
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+    call WaitEnter
+    ret
+
+SM_BadMode:
+    mov  eax, COLOR_ERROR
+    call SetTextColor
+    mov  edx, OFFSET msgSearchInvalid
+    call WriteString
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+    call WaitEnter
+    jmp  SM_Retry
+
+SM_BadNum:
+    mov  eax, COLOR_ERROR
+    call SetTextColor
+    mov  edx, OFFSET msgSearchNumBad
+    call WriteString
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+    call WaitEnter
+    jmp  SM_Retry
+
+SM_EmptyName:
+    mov  eax, COLOR_ERROR
+    call SetTextColor
+    mov  edx, OFFSET msgSearchEmpty
+    call WriteString
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+    call WaitEnter
+    jmp  SM_Retry
+
+SM_Done:
+    ret
+SearchMenuItem ENDP
