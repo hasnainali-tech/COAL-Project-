@@ -1,0 +1,561 @@
+; ============================================================================
+;  Shaheer Ismail Khan (25K-0676) - Menu & Program Flow
+;  Procedures (14): AdminLogin, ReadPassword, ReadKeyWait, ReadNumber,
+;  VerifyString, ShowMainMenu, ShowStatusLine, ClearScreen, WaitEnter,
+;  PrintMenuTable, WritePadded, WriteDecPadded, ViewMenu, Goodbye
+;
+;  NOTE: These procedures rely on the shared constants, .data strings and
+;  PROTOs from the main file, and ShowStatusLine calls CountActiveOrders and
+;  CountReservedTables, which belong to another member's section.
+; ============================================================================
+
+; ----------------------------------------------------------------------------
+; AdminLogin - proposal module 1.
+; Reads a username and a masked password and verifies both with CMPSB
+; (inside VerifyString).  The login repeats until the credentials match.
+; ----------------------------------------------------------------------------
+AdminLogin PROC
+LoginRetry:
+    call ClearScreen
+    mov  eax, COLOR_HEADER
+    call SetTextColor
+    mov  edx, OFFSET loginBanner
+    call WriteString
+
+    mov  eax, COLOR_DIM
+    call SetTextColor
+    mov  edx, OFFSET loginHint
+    call WriteString
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+
+    mov  edx, OFFSET promptUser
+    call WriteString
+    mov  edx, OFFSET userBuf
+    mov  ecx, 32
+    call ReadString
+
+    mov  edx, OFFSET promptPass
+    call WriteString
+    INVOKE ReadPassword, OFFSET passBuf, 32
+
+    ; Verify the username with CMPSB.
+    INVOKE Str_length, OFFSET userBuf  ; EAX = entered length
+    INVOKE VerifyString, OFFSET adminUser, OFFSET userBuf, ADMIN_USER_LEN, eax
+    test eax, eax
+    jz   LoginFailed
+
+    ; Verify the password with CMPSB.
+    INVOKE Str_length, OFFSET passBuf
+    INVOKE VerifyString, OFFSET adminPass, OFFSET passBuf, ADMIN_PASS_LEN, eax
+    test eax, eax
+    jz   LoginFailed
+
+    mov  eax, COLOR_SUCCESS
+    call SetTextColor
+    mov  edx, OFFSET msgLoginOK
+    call WriteString
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+    mov  eax, 800
+    call Delay
+    ret
+
+LoginFailed:
+    mov  eax, COLOR_ERROR
+    call SetTextColor
+    mov  edx, OFFSET msgBadLogin
+    call WriteString
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+    mov  eax, 1200
+    call Delay
+    jmp  LoginRetry
+AdminLogin ENDP
+
+; ----------------------------------------------------------------------------
+; ReadKeyWait - blocking key read that does not flush pending input.
+; Irvine32's ReadKey calls ReadKeyFlush after every key, so fast typing (or a
+; paste) into ReadChar loses characters.  Reading the console input record
+; directly preserves every queued keystroke.
+; Returns: EAX = ASCII code (0 for special/extended keys).
+; ----------------------------------------------------------------------------
+ReadKeyWait PROC USES ebx
+    LOCAL hIn:DWORD
+    LOCAL rec:INPUT_RECORD
+    LOCAL nRead:DWORD
+
+    INVOKE GetStdHandle, STD_INPUT_HANDLE
+    mov  hIn, eax
+RKW_Retry:
+    INVOKE ReadConsoleInput, hIn, ADDR rec, 1, ADDR nRead
+    cmp  nRead, 1
+    jne  RKW_Retry
+    movzx eax, rec.EventType
+    cmp  eax, KEY_EVENT
+    jne  RKW_Retry
+    cmp  rec.Event.bKeyDown, 0
+    je   RKW_Retry
+    movzx eax, rec.Event.uChar.AsciiChar
+    ret
+ReadKeyWait ENDP
+
+; ----------------------------------------------------------------------------
+; ReadPassword - reads a masked line using ReadKeyWait.
+; Receives: pBuffer = destination, maxLen = maximum characters.
+; Returns:  EAX = number of characters stored.
+; Backspace erases, Enter terminates, printable ASCII is echoed as '*'.
+; ----------------------------------------------------------------------------
+ReadPassword PROC USES esi, pBuffer:PTR BYTE, maxLen:DWORD
+    LOCAL count:DWORD
+
+    mov  count, 0
+    mov  esi, pBuffer
+RP_Loop:
+    call ReadKeyWait                   ; AL = ASCII code
+    cmp  al, 13                        ; Enter?
+    je   RP_Done
+    cmp  al, 8                         ; Backspace?
+    je   RP_Backspace
+    cmp  al, 32                        ; ignore control characters
+    jb   RP_Loop
+    cmp  al, 126
+    ja   RP_Loop
+    mov  ecx, count
+    cmp  ecx, maxLen
+    jae  RP_Loop                       ; buffer full: ignore extra keys
+    mov  BYTE PTR [esi+ecx], al
+    inc  count
+    mov  al, '*'
+    call WriteChar
+    jmp  RP_Loop
+
+RP_Backspace:
+    cmp  count, 0
+    je   RP_Loop
+    dec  count
+    mov  al, 8                         ; move back, erase, move back again
+    call WriteChar
+    mov  al, ' '
+    call WriteChar
+    mov  al, 8
+    call WriteChar
+    jmp  RP_Loop
+
+RP_Done:
+    mov  ecx, count
+    mov  BYTE PTR [esi+ecx], 0
+    call Crlf
+    mov  eax, count
+    ret
+ReadPassword ENDP
+
+; ----------------------------------------------------------------------------
+; ReadNumber - reads and strictly validates an unsigned decimal number.
+; Irvine32's ReadDec returns 0 with CF clear when the text is not numeric,
+; which would silently turn "abc" into 0 (a cancel/finish request).  This
+; routine reads a whole line, accepts optional leading/trailing spaces, and
+; sets CF when the line is empty, contains a non-digit, or overflows 32 bits.
+; Returns: EAX = value, CF = 0;  EAX = 0, CF = 1 on error.
+; ----------------------------------------------------------------------------
+ReadNumber PROC USES esi ebx
+    LOCAL buf[16]:BYTE
+    LOCAL digit:DWORD
+
+    lea  edx, buf
+    mov  ecx, 12                       ; up to 11 digits + null terminator
+    call ReadString                    ; EAX = characters read
+    mov  ecx, eax
+    test ecx, ecx
+    jz   RN_Error
+
+    lea  esi, buf
+RN_Lead:
+    mov  al, BYTE PTR [esi]
+    cmp  al, ' '
+    je   RN_SkipLead
+    cmp  al, 9
+    je   RN_SkipLead
+    jmp  RN_Start
+RN_SkipLead:
+    inc  esi
+    dec  ecx
+    jz   RN_Error
+    jmp  RN_Lead
+
+RN_Start:
+    xor  eax, eax                      ; accumulator
+RN_Digit:
+    movzx edx, BYTE PTR [esi]
+    cmp  dl, ' '
+    je   RN_Trail
+    cmp  dl, 9
+    je   RN_Trail
+    sub  edx, '0'
+    cmp  edx, 9
+    ja   RN_Error                      ; not a decimal digit
+    mov  digit, edx
+    mov  ebx, 10
+    mul  ebx                           ; EAX = EAX * 10
+    test edx, edx
+    jnz  RN_Error                      ; overflow past 32 bits
+    add  eax, digit
+    jc   RN_Error
+    inc  esi
+    dec  ecx
+    jz   RN_Ok
+    jmp  RN_Digit
+
+RN_Trail:
+    mov  dl, BYTE PTR [esi]
+    cmp  dl, ' '
+    je   RN_TrailNext
+    cmp  dl, 9
+    jne  RN_Error                      ; junk after the number
+RN_TrailNext:
+    inc  esi
+    dec  ecx
+    jz   RN_Ok
+    jmp  RN_Trail
+
+RN_Ok:
+    clc
+    ret
+RN_Error:
+    xor  eax, eax
+    stc
+    ret
+ReadNumber ENDP
+
+; ----------------------------------------------------------------------------
+; VerifyString - exact byte comparison using CMPSB.
+; Receives: pStored, pEntered, storedLen, enteredLen.
+; Returns:  EAX = 1 if equal, 0 otherwise.
+; ----------------------------------------------------------------------------
+VerifyString PROC USES esi edi ecx, pStored:PTR BYTE, pEntered:PTR BYTE, storedLen:DWORD, enteredLen:DWORD
+    mov  eax, 0
+    mov  ecx, storedLen
+    cmp  ecx, enteredLen
+    jne  VS_Done                       ; different lengths cannot match
+    test ecx, ecx
+    jz   VS_Match
+
+    mov  esi, pStored
+    mov  edi, pEntered
+    cld
+    repe cmpsb                         ; compare bytes while equal
+    jne  VS_Done                       ; ZF=0 means a mismatch
+
+VS_Match:
+    mov  eax, 1
+VS_Done:
+    ret
+VerifyString ENDP
+
+; ----------------------------------------------------------------------------
+; ShowMainMenu - proposal module 2.
+; Draws the main menu, shows status, reads a validated choice 1..7.
+; Returns: EAX = choice.
+; ----------------------------------------------------------------------------
+ShowMainMenu PROC
+MenuRetry:
+    call ClearScreen
+    mov  eax, COLOR_HEADER
+    call SetTextColor
+    mov  edx, OFFSET mainMenuBanner
+    call WriteString
+    call ShowStatusLine
+
+    mov  eax, COLOR_MENU
+    call SetTextColor
+    mov  edx, OFFSET mainMenuOptions
+    call WriteString
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+
+    mov  edx, OFFSET promptChoice
+    call WriteString
+    call ReadNumber
+    jc   MenuBad
+    cmp  eax, 1
+    jb   MenuBad
+    cmp  eax, 7
+    ja   MenuBad
+    ret
+
+MenuBad:
+    mov  eax, COLOR_ERROR
+    call SetTextColor
+    mov  edx, OFFSET msgBadChoice
+    call WriteString
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+    mov  eax, 700
+    call Delay
+    jmp  MenuRetry
+ShowMainMenu ENDP
+
+; ----------------------------------------------------------------------------
+; ShowStatusLine - one-line status of orders, reservations and receipts.
+; ----------------------------------------------------------------------------
+ShowStatusLine PROC
+    mov  eax, COLOR_DIM
+    call SetTextColor
+    mov  edx, OFFSET statusPrefix
+    call WriteString
+
+    call CountActiveOrders
+    test eax, eax
+    jz   SSL_Idle
+    push eax
+    mov  edx, OFFSET msgStatusActive
+    call WriteString
+    pop  eax
+    call WriteDec
+    jmp  SSL_Tables
+SSL_Idle:
+    mov  edx, OFFSET msgStatusIdle
+    call WriteString
+
+SSL_Tables:
+    mov  edx, OFFSET msgTablesReserved
+    call WriteString
+    call CountReservedTables
+    call WriteDec
+    mov  edx, OFFSET msgOf
+    call WriteString
+    mov  eax, TABLE_COUNT
+    call WriteDec
+
+    mov  edx, OFFSET msgReceipts
+    call WriteString
+    mov  eax, receiptNo
+    dec  eax                           ; receipts already issued
+    call WriteDec
+    call Crlf
+
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+    ret
+ShowStatusLine ENDP
+
+; ----------------------------------------------------------------------------
+; WritePadded - writes a null-terminated string then pads with spaces.
+; Receives: pString, fieldWidth.  If the string is longer, nothing is padded.
+; ----------------------------------------------------------------------------
+WritePadded PROC pString:PTR BYTE, fieldWidth:DWORD
+    LOCAL len:DWORD, pad:DWORD
+    INVOKE Str_length, pString
+    mov  len, eax
+    mov  edx, pString
+    call WriteString
+
+    mov  eax, fieldWidth
+    sub  eax, len
+    jbe  WP_Done                       ; fieldWidth <= length
+    mov  pad, eax
+WP_Spaces:
+    mov  al, ' '
+    call WriteChar
+    dec  pad
+    jnz  WP_Spaces
+WP_Done:
+    ret
+WritePadded ENDP
+
+; ----------------------------------------------------------------------------
+; WriteDecPadded - writes an unsigned decimal right-aligned in a field.
+; Receives: value, fieldWidth.
+; ----------------------------------------------------------------------------
+WriteDecPadded PROC USES ebx, value:DWORD, fieldWidth:DWORD
+    LOCAL digits:DWORD, pad:DWORD, val:DWORD
+    mov  eax, value
+    mov  val, eax
+    mov  digits, 1
+    cmp  eax, 10
+    jb   WDP_Print
+    mov  ebx, 10
+WDP_Count:
+    xor  edx, edx
+    div  ebx
+    inc  digits
+    cmp  eax, 10
+    jae  WDP_Count
+WDP_Print:
+    mov  eax, fieldWidth
+    sub  eax, digits
+    jbe  WDP_Value
+    mov  pad, eax
+WDP_Spaces:
+    mov  al, ' '
+    call WriteChar
+    dec  pad
+    jnz  WDP_Spaces
+WDP_Value:
+    mov  eax, val
+    call WriteDec
+    ret
+WriteDecPadded ENDP
+
+; ----------------------------------------------------------------------------
+; ClearScreen - clears only the visible console window.
+; Irvine32's Clrscr writes blanks to every line of the console buffer.  The
+; default Windows console buffer is 9001 lines, which makes Clrscr take several
+; seconds.  This routine clears just the visible window (about 30 lines) and
+; homes the cursor, so every menu redraw is instant.
+; ----------------------------------------------------------------------------
+ClearScreen PROC USES edi ebx
+    LOCAL info:CONSOLE_SCREEN_BUFFER_INFO
+    LOCAL origin:COORD
+    LOCAL written:DWORD
+    LOCAL fieldWidth:DWORD
+    LOCAL row:DWORD
+
+    INVOKE GetStdHandle, STD_OUTPUT_HANDLE
+    mov  ebx, eax
+    INVOKE GetConsoleScreenBufferInfo, ebx, ADDR info
+
+    ; width = visible window width, capped at MAX_CLEAR_COLS
+    movzx eax, info.srWindow.Right
+    movzx ecx, info.srWindow.Left
+    sub  eax, ecx
+    inc  eax
+    cmp  eax, MAX_CLEAR_COLS
+    jbe  CS_WidthOK
+    mov  eax, MAX_CLEAR_COLS
+CS_WidthOK:
+    mov  fieldWidth, eax
+
+    ; Fill the attribute buffer with the current console attribute.
+    mov  ax, info.wAttributes
+    mov  ecx, fieldWidth
+    mov  edi, OFFSET clearAttribs
+    rep  stosw
+
+    ; Clear each visible row.
+    mov  origin.X, 0
+    movzx eax, info.srWindow.Top
+    mov  row, eax
+CS_Row:
+    mov  eax, row
+    movzx ecx, info.srWindow.Bottom
+    cmp  eax, ecx
+    ja   CS_Done
+    mov  origin.Y, ax
+    INVOKE WriteConsoleOutputCharacter, ebx, ADDR clearBlanks, fieldWidth, origin, ADDR written
+    INVOKE WriteConsoleOutputAttribute, ebx, ADDR clearAttribs, fieldWidth, origin, ADDR written
+    inc  row
+    jmp  CS_Row
+
+CS_Done:
+    mov  origin.X, 0
+    movzx eax, info.srWindow.Top
+    mov  origin.Y, ax
+    INVOKE SetConsoleCursorPosition, ebx, origin
+    ret
+ClearScreen ENDP
+
+; ----------------------------------------------------------------------------
+; WaitEnter - replacement for Irvine32 WaitMsg.
+; WaitMsg uses ReadChar, and ReadChar's ReadKey flushes the console input
+; buffer after every poll.  A key that arrives just before a flush is lost.
+; This routine uses ReadKeyWait, which never flushes, so a key press is never
+; dropped.  The prompt text matches WaitMsg exactly.
+; ----------------------------------------------------------------------------
+WaitEnter PROC
+    mov  edx, OFFSET msgPressAnyKey
+    call WriteString
+    call ReadKeyWait
+    call Crlf
+    ret
+WaitEnter ENDP
+
+; ----------------------------------------------------------------------------
+; ViewMenu - proposal module 3.
+; Displays item names, prices and stock.  Names are reached indirectly
+; through menuNames, while prices/stock are parallel DWORD arrays.
+; ----------------------------------------------------------------------------
+ViewMenu PROC
+    call ClearScreen
+    mov  eax, COLOR_HEADER
+    call SetTextColor
+    mov  edx, OFFSET menuTitle
+    call WriteString
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+
+    call PrintMenuTable
+
+    mov  eax, COLOR_DIM
+    call SetTextColor
+    mov  edx, OFFSET menuFooter
+    call WriteString
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+    call WaitEnter
+    ret
+ViewMenu ENDP
+
+; ----------------------------------------------------------------------------
+; PrintMenuTable - prints the menu rows (no clearing, no pause).
+; ----------------------------------------------------------------------------
+PrintMenuTable PROC USES esi
+    LOCAL i:DWORD
+    mov  eax, COLOR_HEADER
+    call SetTextColor
+    mov  edx, OFFSET menuTableHeader
+    call WriteString
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+
+    mov  i, 0
+PMT_Loop:
+    mov  eax, i
+    cmp  eax, MAX_ITEMS
+    jae  PMT_Done
+
+    inc  eax                           ; display item number as 1..10
+    INVOKE WriteDecPadded, eax, 3
+    mov  edx, OFFSET colSep
+    call WriteString
+
+    mov  eax, i
+    lea  esi, menuNames                ; parallel pointer array
+    mov  edx, DWORD PTR [esi+eax*4]    ; indirect: name address
+    INVOKE WritePadded, edx, 24
+
+    mov  eax, i
+    lea  esi, menuPrices
+    mov  eax, DWORD PTR [esi+eax*4]
+    INVOKE WriteDecPadded, eax, 9
+
+    mov  eax, i
+    lea  esi, menuStock
+    mov  eax, DWORD PTR [esi+eax*4]
+    INVOKE WriteDecPadded, eax, 7
+    call Crlf
+
+    inc  i
+    jmp  PMT_Loop
+PMT_Done:
+    mov  edx, OFFSET menuDivider
+    call WriteString
+    ret
+PrintMenuTable ENDP
+
+; ----------------------------------------------------------------------------
+; Goodbye - final screen before ExitProcess.
+; ----------------------------------------------------------------------------
+Goodbye PROC
+    call ClearScreen
+    mov  eax, COLOR_SUCCESS
+    call SetTextColor
+    mov  edx, OFFSET msgGoodbye
+    call WriteString
+    mov  eax, COLOR_NORMAL
+    call SetTextColor
+    mov  edx, OFFSET msgGroup
+    call WriteString
+    call WaitEnter
+    ret
+Goodbye ENDP
